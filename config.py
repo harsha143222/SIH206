@@ -31,13 +31,25 @@ for folder in [DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, INDEXES_DIR, DB_DIR]:
 # ==============================================================================
 # 2. API & MODEL CONFIGURATION (OFFICIAL GOOGLE GENAI SDK)
 # ==============================================================================
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+def get_gemini_model() -> str:
+    """
+    Retrieve GEMINI_MODEL from environment variables or Streamlit secrets,
+    defaulting to gemini-3.5-flash.
+    """
+    model = os.getenv("GEMINI_MODEL", "").strip()
+    if not model or model == "your_model_here":
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "GEMINI_MODEL" in st.secrets:
+                model = str(st.secrets["GEMINI_MODEL"]).strip()
+        except Exception:
+            pass
+    return model if model else "gemini-3.5-flash"
+
+GEMINI_MODEL = get_gemini_model()
 EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004").strip()
 
-GEMINI_MODEL_FALLBACKS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-]
+GEMINI_MODEL_FALLBACKS = []
 
 GENERATION_CONFIG = {
     "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.7")),

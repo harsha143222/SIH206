@@ -1,6 +1,6 @@
 # 🎓 EduMind AI — Smart Education AI Tutor
 
-EduMind AI is an intelligent, personalized, and grounded AI educational assistant built for Smart Education (SIH 2026, Problem Statement ID 26207). Powered by the official **Google GenAI Python SDK (`google-genai`)** and **Gemini 2.5 Flash**, EduMind AI enables students to upload course materials (PDF, PPT, PPTX up to 100 MB), clear doubts with strict grounded answer policies, take gamified quizzes with coin rewards and hints, learn together in study groups, track their progress persistently, and listen to explanations using browser voice synthesis.
+EduMind AI is an intelligent, personalized, and grounded AI educational assistant built for Smart Education (SIH 2026, Problem Statement ID 26207). Powered by the official **Google GenAI Python SDK (`google-genai`)** and **Gemini 3.5 Flash**, EduMind AI enables students to upload course materials (PDF, PPT, PPTX up to 100 MB), clear doubts with strict grounded answer policies, take gamified quizzes with coin rewards and hints, learn together in study groups, track their progress persistently, and listen to explanations using browser voice synthesis.
 
 ---
 
@@ -22,7 +22,7 @@ The application is built using a unified Streamlit framework with modular engine
 └─────┬──────────────┘   └───────────┬──────────┘   └───────────────┬─────────────┘
       │                              │                              │
       ▼                              ▼                              ▼
-  Gemini 2.5 Flash /       Subject-Isolated           edumind.db
+  Gemini 3.5 Flash /       Subject-Isolated           edumind.db
   text-embedding-004       Vector Indexes (FAISS)     (Users, Docs, Quizzes, Groups)
 ```
 
@@ -30,7 +30,7 @@ The application is built using a unified Streamlit framework with modular engine
 
 ## ✨ Key Features
 
-1. **Official Google GenAI SDK Integration**: Fully updated to `from google import genai` (`google-genai` package) with model fallbacks (`gemini-2.5-flash`, `gemini-2.5-pro`).
+1. **Official Google GenAI SDK Integration**: Fully updated to `from google import genai` (`google-genai` package) with configurable `GEMINI_MODEL=gemini-3.5-flash`.
 2. **Real Semantic Retrieval (RAG)**: Full document text extraction (PDF via `pypdf`, PPT/PPTX via `python-pptx`), page/slide-level chunking, vector embedding generation (`text-embedding-004`), and FAISS vector indexing.
 3. **Subject Isolation**: Course materials and vector indexes are completely isolated per subject (e.g. Java materials do not leak into Python searches).
 4. **Strict Grounded Answer Policy**: Answers are strictly derived from retrieved course material. If information is missing, EduMind AI responds clearly: *"I couldn't find this information in the uploaded course material."*
@@ -77,7 +77,7 @@ EduMind AI reads credentials securely without asking students to enter API keys 
 Create a `.env` file in the root directory:
 ```env
 GEMINI_API_KEY=your_actual_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.5-flash
 MAX_FILE_SIZE_MB=100
 TOP_K=4
 CHUNK_SIZE=800
@@ -88,7 +88,7 @@ CHUNK_OVERLAP=150
 In your Streamlit Cloud Dashboard, navigate to **Settings -> Secrets** and paste:
 ```toml
 GEMINI_API_KEY = "your_actual_gemini_api_key_here"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 ```
 
 ---
@@ -138,7 +138,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 1. Push code to your GitHub repository (ensure `.env` is ignored by `.gitignore`).
 2. Log in to [Streamlit Community Cloud](https://streamlit.io/cloud).
 3. Click **New app**, select your repository and branch, and set Main file path to `app.py`.
-4. Go to **Advanced settings -> Secrets** and add your `GEMINI_API_KEY`.
+4. Go to **Advanced settings -> Secrets** and add your `GEMINI_API_KEY` and optional `GEMINI_MODEL`.
 5. Click **Deploy!**
 
 ---
@@ -146,7 +146,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 ## ❓ Troubleshooting
 
 - **Gemini API Key Missing Error:** Ensure `GEMINI_API_KEY` is set in your `.env` or Streamlit Secrets.
-- **Model Unavailable / 404 Error:** Ensure `GEMINI_MODEL` is set to a currently supported model like `gemini-2.5-flash`.
+- **Model Unavailable / 404 Error:** Ensure `GEMINI_MODEL` is set to a currently supported model like `gemini-3.5-flash`.
 - **Quota Exceeded (429):** The application handles rate limits with exponential backoff; wait a minute before retrying.
 - **Voice Not Playing:** Ensure browser audio permissions are allowed. Browser SpeechSynthesis requires a user gesture or page interaction.
 

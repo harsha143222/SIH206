@@ -64,8 +64,11 @@ def _get_candidate_models(model_override: Optional[str] = None) -> List[str]:
     models = []
     if model_override and model_override.strip():
         models.append(model_override.strip())
-    if config.GEMINI_MODEL and config.GEMINI_MODEL not in models:
-        models.append(config.GEMINI_MODEL)
+    
+    current_model = config.get_gemini_model()
+    if current_model not in models:
+        models.append(current_model)
+
     for fb in config.GEMINI_MODEL_FALLBACKS:
         if fb not in models:
             models.append(fb)
