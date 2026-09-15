@@ -30,14 +30,21 @@ except ImportError:
 
 def hash_password(password: str) -> str:
     """Hash plaintext password securely using werkzeug, bcrypt, or pbkdf2_hmac."""
+    if not password:
+        return ""
     if HAS_WERKZEUG:
-        return generate_password_hash(password, method='pbkdf2:sha256')
-    elif HAS_BCRYPT:
-        salt = bcrypt.gensalt(12)
-        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    else:
-        import hashlib
-        return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
+        try:
+            return generate_password_hash(password)
+        except Exception as e:
+            logger.warning("werkzeug generate_password_hash failed: %s", str(e))
+    if HAS_BCRYPT:
+        try:
+            salt = bcrypt.gensalt(12)
+            return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+        except Exception as e:
+            logger.warning("bcrypt hashpw failed: %s", str(e))
+    import hashlib
+    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
 
 def verify_password(password: str, hashed: str) -> bool:
     """Verify plaintext password against stored password hash across all hashing engines."""
