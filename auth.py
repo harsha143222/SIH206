@@ -16,15 +16,17 @@ logger = logging.getLogger("auth")
 
 # Password Hashing Utilities
 try:
+    import werkzeug
+    from werkzeug.security import generate_password_hash, check_password_hash
+    HAS_WERKZEUG = True
+except ImportError:
+    HAS_WERKZEUG = False
+
+try:
     import bcrypt
     HAS_BCRYPT = True
 except ImportError:
     HAS_BCRYPT = False
-    try:
-        from werkzeug.security import generate_password_hash, check_password_hash
-        HAS_WERKZEUG = True
-    except ImportError:
-        HAS_WERKZEUG = False
 
 def hash_password(password: str) -> str:
     """Hash plaintext password securely using werkzeug, bcrypt, or pbkdf2_hmac."""
