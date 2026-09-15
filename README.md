@@ -41,6 +41,9 @@ The application is built using a unified Streamlit framework with modular engine
 9. **Multimodal Image Vision**: Upload textbook questions, code screenshots, or handwritten notes for instant step-by-step solutions using Gemini Multimodal Vision.
 10. **Group Learning & Friends Dashboard**: Study groups, shared notes, group chat, group quizzes, and group leaderboards.
 
+11. **Student Performance Analytics System (`📊 My Analytics`)**: Complete user-isolated dashboard tracking overall progress, quiz accuracy, study time, questions asked, weak & strong topic detection, time-series learning trends (7, 30, 90 days), AI doubt analytics, study session tracking, AI recommendations, and gamified achievements.
+12. **Admin Analytics Dashboard (`📊 Admin Analytics`)**: Aggregated platform-wide statistics for administrators showing total active users, platform average scores, quiz completion rates, and subject distribution while strictly preserving student privacy.
+
 ---
 
 ## 📁 File Structure
@@ -48,15 +51,26 @@ The application is built using a unified Streamlit framework with modular engine
 ```
 SIH_206/
 ├── app.py                   # Main Streamlit Application UI & Dispatcher
+├── analytics.py             # Student & Admin Analytics Calculation Service
 ├── config.py                # Central Configuration, Paths, Prompts, Models
-├── database.py              # SQLite Local Persistence Layer
+├── database.py              # SQLite Local Persistence Layer & Analytics Schema
+├── mongodb.py               # MongoDB Atlas Dual Persistence Layer & Analytics
 ├── document_processor.py    # Document Parsing, Chunking & FAISS Vector Indexing
 ├── gemini_client.py         # Official google-genai Client & Model Invocation
-├── quiz_engine.py           # Grounded Gamified Quiz Generator & Evaluator
+├── quiz_engine.py           # Grounded Gamified Quiz Generator & Analytics Logging
 ├── learning_tracker.py      # Topic Extraction, Progress Analytics & Streaks
 ├── group_learning.py        # Study Groups, Shared Materials & Leaderboards
+├── test_analytics.py        # Analytics & Isolation Automated Test Suite
 ├── voice_engine.py          # Client-Side Browser Voice Synthesis
-├── grok_client.py           # Forwarding Compatibility Wrapper
+├── ui/                      # UI Views & Components
+│   ├── analytics.py         # Student Analytics Dashboard UI
+│   ├── admin_analytics.py   # Admin Platform Analytics Dashboard UI
+│   ├── charts.py            # Plotly Visualization Charts
+│   ├── dashboard.py         # Main Student Quick-Action Dashboard
+│   ├── login.py             # Authentication Login View
+│   ├── profile.py           # Student Profile & Wallet View
+│   ├── register.py          # Account Registration View
+│   └── settings.py          # Settings & Voice Configuration View
 ├── requirements.txt         # Dependency Manifest
 ├── .env.example             # Environment Variable Template
 ├── .gitignore               # Git Ignore Rules
@@ -66,6 +80,19 @@ SIH_206/
     ├── indexes/             # FAISS Vector Indexes by Subject
     └── database/            # edumind.db SQLite Database
 ```
+
+---
+
+## 🗄️ Analytics Database Schema Extension
+
+The database architecture is extended with 6 new schema tables / collections, ensuring strict user isolation:
+
+1. **`quiz_attempts`**: Stores attempt-level details (score, total questions, percentage, correct/wrong count, difficulty, timestamp).
+2. **`quiz_answers`**: Stores question-level performance (selected option, correct option, is_correct, hint usage, difficulty).
+3. **`topic_performance`**: Tracks topic & subtopic mastery levels (attempt count, average score, last attempt, mastery status `Strong` / `Needs Practice` / `Needs Revision`).
+4. **`chat_interactions`**: Logs AI doubt queries and topics asked to AI for confusion detection.
+5. **`learning_sessions`**: Tracks study session start time, duration, and subject activity.
+6. **`recommendations`**: Persists AI personalized recommendations based on actual historical performance.
 
 ---
 

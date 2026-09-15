@@ -131,13 +131,15 @@ def create_user(email: str, username: str, password_hash: str) -> Optional[Dict[
         return None
 
 def find_user_by_email_or_username(identifier: str) -> Optional[Dict[str, Any]]:
-    """Find user document by email or username."""
+    """Find user document by email or username (case-insensitive)."""
     db = get_db()
     if db is None:
         return None
 
     clean = identifier.strip()
-    query = {"$or": [{"email": clean.lower()}, {"username": clean}]}
+    import re
+    regex_pattern = f"^{re.escape(clean)}$"
+    query = {"$or": [{"email": clean.lower()}, {"username": {"$regex": regex_pattern, "$options": "i"}}]}
     try:
         user = db.users.find_one(query)
         if user:

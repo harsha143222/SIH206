@@ -191,6 +191,30 @@ def record_learned_topic(
     rec.add_interaction(question=user_question, subtopic=subtopic_name, source=source, explanation=explanation)
 
     database.save_subject(subject)
+
+    # Save to Chat Interactions and Topic Performance tables
+    if user_question:
+        import uuid
+        int_id = f"chat_{uuid.uuid4().hex[:10]}"
+        database.save_chat_interaction(
+            interaction_id=int_id,
+            user_id=user_id,
+            subject=subject,
+            question=user_question,
+            topic=norm_topic,
+            subtopic=subtopic_name or "General",
+            source_doc=source or "",
+            status="success"
+        )
+        database.save_or_update_topic_performance(
+            user_id=user_id,
+            subject=subject,
+            topic=norm_topic,
+            subtopic=subtopic_name or "General",
+            ai_question_inc=1,
+            study_time_inc=120
+        )
+
     return rec
 
 

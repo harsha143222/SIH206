@@ -115,8 +115,13 @@ def render_register_page():
                     )
                     if ok:
                         st.success(f"🎉 {msg}")
-                        st.session_state.auth_mode = "login"
-                        st.rerun()
+                        # Auto-login immediately upon successful registration
+                        login_ok, login_msg = auth.login_user(username, password)
+                        if login_ok:
+                            st.rerun()
+                        else:
+                            st.session_state.auth_mode = "login"
+                            st.rerun()
                     else:
                         st.error(f"❌ {msg}")
 

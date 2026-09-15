@@ -27,29 +27,56 @@ except ImportError:
         HAS_WERKZEUG = False
 
 def hash_password(password: str) -> str:
-    """Hash plaintext password securely using bcrypt or werkzeug."""
-    if HAS_BCRYPT:
+    """Hash plaintext password securely using werkzeug, bcrypt, or pbkdf2_hmac."""
+    if HAS_WERKZEUG:
+        return generate_password_hash(password, method='pbkdf2:sha256')
+    elif HAS_BCRYPT:
         salt = bcrypt.gensalt(12)
         return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    elif HAS_WERKZEUG:
-        return generate_password_hash(password, method='pbkdf2:sha256')
     else:
         import hashlib
         return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Verify plaintext password against stored password hash."""
+    """Verify plaintext password against stored password hash across all hashing engines."""
     if not password or not hashed:
         return False
     try:
-        if HAS_BCRYPT and hashed.startswith(('$', '$', '$')):
-            return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
-        elif HAS_WERKZEUG and ('sha256' in hashed or 'pbkdf2' in hashed or 'scrypt' in hashed):
-            return check_password_hash(hashed, password)
-        else:
-            import hashlib
-            computed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
-            return computed == hashed
+        clean_pw = password
+        clean_hash = hashed.strip()
+
+        # 1. Check bcrypt hashes ($2a$, $2b$, $2y$)
+        if clean_hash.startswith(('$2a$', '$2b$', '$2y$', '$2a', '$2b', '$2y')):
+            if HAS_BCRYPT:
+                return bcrypt.checkpw(clean_pw.encode('utf-8'), clean_hash.encode('utf-8'))
+            elif HAS_WERKZEUG:
+                try:
+                    return check_password_hash(clean_hash, clean_pw)
+                except Exception:
+                    pass
+
+        # 2. Check werkzeug hashes (pbkdf2, scrypt, sha256)
+        if HAS_WERKZEUG and (':' in clean_hash or '$' in clean_hash):
+            try:
+                if check_password_hash(clean_hash, clean_pw):
+                    return True
+            except Exception:
+                pass
+
+        # 3. Check plain hashlib pbkdf2_hmac hex hash
+        import hashlib
+        computed = hashlib.pbkdf2_hmac('sha256', clean_pw.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
+        if computed == clean_hash:
+            return True
+
+        # 4. Fallback check_password_hash if HAS_WERKZEUG
+        if HAS_WERKZEUG:
+            try:
+                return check_password_hash(clean_hash, clean_pw)
+            except Exception:
+                pass
+
+        return False
     except Exception as e:
         logger.error("Error verifying password: %s", str(e))
         return False
@@ -91,7 +118,7 @@ def validate_password(password: str) -> Tuple[bool, str]:
     return True, "Strong password"
 
 # Authentication Operations
-def register_user(email: str, username: str, password: str, display_name: str = "", avatar: str = "??") -> Tuple[bool, str]:
+def register_user(email: str, username: str, password: str, display_name: str = "", avatar: str = "🎓") -> Tuple[bool, str]:
     """Register a new student account."""
     val_e, msg_e = validate_email(email)
     if not val_e:
@@ -119,8 +146,11 @@ def register_user(email: str, username: str, password: str, display_name: str = 
 
     # Also check SQLite fallback
     sqlite_user = database.get_user_profile(clean_username)
+    if not sqlite_user:
+        sqlite_user = database.get_user_profile(clean_email)
+
     if sqlite_user:
-        return False, "An account with this username already exists."
+        return False, "An account with this email address or username already exists."
 
     pw_hash = hash_password(password)
 
@@ -173,7 +203,8 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
         
         # Verify fallback
         user_id = sqlite_user["user_id"]
-        display_name = sqlite_user.get("display_name") or sqlite_user.get("username", clean_id)
+        username = sqlite_user.get("username", clean_id)
+        display_name = sqlite_user.get("display_name") or username
         coins = sqlite_user.get("coin_balance", 100)
         streak = sqlite_user.get("streak_days", 1)
         email = sqlite_user.get("email") or f"{clean_id}@edumind.app"
@@ -182,9 +213,12 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
         st.session_state.authenticated = True
         st.session_state.user_id = user_id
         st.session_state.user_email = email
-        st.session_state.username = clean_id
+        st.session_state.username = username
         st.session_state.user_name = display_name
         st.session_state.display_name = display_name
+        st.session_state.avatar = "🎓"
+        st.session_state.user_bio = "EduMind AI Scholar"
+        st.session_state.member_since = "September 2026"
         st.session_state.coin_balance = coins
         st.session_state.current_streak = streak
         return True, f"Welcome back, {display_name}!"

@@ -308,12 +308,12 @@ def render_dashboard_page():
     col_q1, col_q2, col_q3, col_q4, col_q5, col_q6 = st.columns(6)
 
     actions = [
-        ("💬", "Ask AI Tutor", "Clear your doubts instantly", "🏠 Home / Individual Learning", col_q1),
-        ("📚", "Upload Notes", "Add course materials & RAG", "🏠 Home / Individual Learning", col_q2),
-        ("🎯", "Aptitude", "Practice reasoning & math", "🎯 Aptitude Practice", col_q3),
-        ("🎮", "Games", "Play & learn concepts", "🎮 Educational Games", col_q4),
-        ("👥", "Study Groups", "Collaborate with peers", "👥 Friends Dashboard", col_q5),
-        ("👤", "Profile", "View analytics & info", "👤 Profile & Analytics", col_q6),
+        ("📊", "My Analytics", "Detailed performance & charts", "📊 My Analytics", col_q1),
+        ("💬", "Ask AI Tutor", "Clear your doubts instantly", "🏠 Home / Individual Learning", col_q2),
+        ("📚", "Upload Notes", "Add course materials & RAG", "🏠 Home / Individual Learning", col_q3),
+        ("🎯", "Aptitude", "Practice reasoning & math", "🎯 Aptitude Practice", col_q4),
+        ("🎮", "Games", "Play & learn concepts", "🎮 Educational Games", col_q5),
+        ("👥", "Study Groups", "Collaborate with peers", "👥 Friends Dashboard", col_q6),
     ]
 
     for icon, title, desc, target_page, col in actions:

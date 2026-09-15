@@ -35,6 +35,8 @@ from ui.register import render_register_page
 from ui.dashboard import render_dashboard_page
 from ui.profile import render_profile_page
 from ui.settings import render_settings_page
+from ui.analytics import render_student_analytics_page
+from ui.admin_analytics import render_admin_analytics_page
 
 # ==============================================================================
 # 1. STREAMLIT PAGE CONFIGURATION & THEME STYLES
@@ -646,12 +648,14 @@ with st.sidebar:
 
     PAGE_OPTIONS = [
         "📊 Student Dashboard",
+        "📊 My Analytics",
         "🏠 Home / Individual Learning",
         "🎯 Aptitude Practice",
         "🎮 Educational Games",
         "👥 Friends Dashboard",
         "👤 Profile & Analytics",
-        "⚙️ Settings & Voice"
+        "⚙️ Settings & Voice",
+        "📊 Admin Analytics"
     ]
 
     if "current_page" not in st.session_state:
@@ -1960,7 +1964,11 @@ def render_friends_dashboard():
 
 current_page = st.session_state.get("current_page", nav_mode)
 
-if "Dashboard" in current_page:
+if "Admin" in current_page:
+    render_admin_analytics_page()
+elif "My Analytics" in current_page:
+    render_student_analytics_page()
+elif "Dashboard" in current_page:
     render_dashboard_page()
 elif "Friends" in current_page:
     render_friends_dashboard()

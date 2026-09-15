@@ -416,6 +416,71 @@ def evaluate_quiz(
         report=report
     )
 
+    # Save detailed analytics records
+    import mongodb
+    mongodb.save_quiz_result(
+        user_id=user_id,
+        attempt_id=quiz.quiz_id,
+        subject=quiz.subject,
+        title=quiz.title,
+        score=correct_count,
+        total=quiz.total_questions,
+        pct=quiz.percentage,
+        coins=quiz.coins_earned,
+        report=report
+    )
+
+    # Save Quiz Attempt
+    database.save_quiz_attempt_record(
+        attempt_id=quiz.quiz_id,
+        quiz_id=quiz.quiz_id,
+        user_id=user_id,
+        subject=quiz.subject,
+        topics_json=json.dumps(quiz.topics_covered),
+        score=correct_count,
+        total_questions=quiz.total_questions,
+        pct=quiz.percentage,
+        correct=correct_count,
+        wrong=quiz.total_questions - correct_count,
+        difficulty="Mixed",
+        time_taken_seconds=quiz.total_questions * 45
+    )
+
+    # Save Question-Level Answers
+    answers_batch = []
+    for fb in question_feedback:
+        ans_id = f"ans_{quiz.quiz_id}_q{fb['question_id']}"
+        answers_batch.append({
+            "answer_id": ans_id,
+            "user_id": user_id,
+            "attempt_id": quiz.quiz_id,
+            "quiz_id": quiz.quiz_id,
+            "question_id": fb["question_id"],
+            "subject": quiz.subject,
+            "topic": fb["topic"],
+            "subtopic": fb.get("subtopic", "General"),
+            "selected_answer": fb.get("selected_index"),
+            "correct_answer": fb["correct_index"],
+            "is_correct": fb["is_correct"],
+            "difficulty": fb.get("difficulty", "Medium"),
+            "hint_used": fb.get("used_hint", False)
+        })
+    database.save_quiz_answers_batch(answers_batch)
+
+    # Save / Update Topic Performance per topic
+    for topic_name, stats in topic_results.items():
+        t_pct = round((stats["correct"] / stats["total"]) * 100, 1) if stats["total"] > 0 else 0.0
+        database.save_or_update_topic_performance(
+            user_id=user_id,
+            subject=quiz.subject,
+            topic=topic_name,
+            subtopic="General",
+            score_pct=t_pct,
+            num_correct=stats["correct"],
+            num_wrong=stats["total"] - stats["correct"],
+            study_time_inc=stats["total"] * 60
+        )
+
     return report
 
 
