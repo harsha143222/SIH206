@@ -15,6 +15,7 @@ import database
 import document_processor
 import gemini_client
 from learning_tracker import TopicRecord, format_learned_topics_summary
+from coin_manager import CoinManager
 
 logger = logging.getLogger("quiz_engine")
 
@@ -315,11 +316,21 @@ def evaluate_quiz(
         is_correct = (selected_opt is not None and selected_opt == q.correct_index)
         used_hint = quiz.hints_used.get(q.id, False)
 
-        q_coins = q.coin_reward if is_correct else 0
+        q_coins = 0
         if is_correct:
             correct_count += 1
-            coins_earned += q.coin_reward
             topic_results[topic]["correct"] += 1
+            q_reward_key = f"quiz_question_{quiz.quiz_id}_q{q.id}_correct"
+            awarded = CoinManager.claim_reward(
+                reward_id=q_reward_key,
+                amount=q.coin_reward,
+                reason=f"Correct {q.difficulty} quiz answer: {q.topic}",
+                source="quiz",
+                reference_id=f"q_{q.id}"
+            )
+            if awarded:
+                q_coins = q.coin_reward
+                coins_earned += q.coin_reward
 
         question_feedback.append({
             "question_id": q.id,
@@ -337,8 +348,23 @@ def evaluate_quiz(
             "correct_text": q.options[q.correct_index],
             "explanation": q.explanation,
             "source_citation": q.source_citation,
-            "coins_earned": q_coins if not already_awarded else 0
+            "coins_earned": q_coins
         })
+
+    # Quiz Completion Bonus (+10 coins)
+    completion_key = f"quiz_completion_{quiz.quiz_id}"
+    if CoinManager.claim_reward(
+        reward_id=completion_key,
+        amount=10,
+        reason=f"Completed Quiz: {quiz.title}",
+        source="quiz",
+        reference_id=quiz.quiz_id
+    ):
+        coins_earned += 10
+
+    # Record activity for streaks and achievements
+    CoinManager.record_study_activity("quizzes")
+    CoinManager.record_study_activity("correct_quiz_answers", increment=correct_count)
 
     quiz.score = correct_count
     quiz.percentage = round((correct_count / quiz.total_questions) * 100, 1) if quiz.total_questions > 0 else 0.0

@@ -139,11 +139,11 @@ def render_voice_button(text_to_speak: str, button_id: str, voice_gender: str = 
 
 
 def render_voice_test_button(voice_gender: str = None) -> None:
-    """Render a 🎙️ Test Voice button in sidebar."""
+    """Render a 🎙️ Test Voice button in Settings."""
     active_gender = voice_gender or st.session_state.get("selected_voice_gender", "Female")
     test_text = f"Hello! I am your EduMind AI tutor speaking in {active_gender} voice."
 
-    if st.button("🎙️ Test Voice", key="btn_test_voice_sidebar", use_container_width=True):
+    if st.button("🎙️ Test Voice", key="btn_test_voice_settings", use_container_width=True):
         st.session_state["playing_test_voice"] = True
 
     if st.session_state.get("playing_test_voice", False):

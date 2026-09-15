@@ -30,8 +30,8 @@ def create_sample_groups(user_name: str = "Student (You)") -> Dict[str, Dict[str
     Create initial sample study groups so the student can immediately test
     and experience group features upon first launch.
     """
-    g1_id = "C_SQUAD_101"
-    g2_id = "AI_HACK_2026"
+    g1_id = "grp_c_squad_101"
+    g2_id = "grp_ai_hack_2026"
 
     # Learned topics for Group 1
     g1_topics: Dict[str, TopicRecord] = {}
@@ -60,6 +60,7 @@ def create_sample_groups(user_name: str = "Student (You)") -> Dict[str, Dict[str
         "group_name": "C Programming Squad",
         "subject": "C Programming",
         "join_code": "C_SQUAD_101",
+        "invite_token": "inv_c_squad_101",
         "created_by": "Rahul Sharma",
         "created_at": datetime.datetime.now().strftime("%Y-%m-%d"),
         "members": {
@@ -117,6 +118,7 @@ def create_sample_groups(user_name: str = "Student (You)") -> Dict[str, Dict[str
         "group_name": "AI & Python Hackers",
         "subject": "Python & AI",
         "join_code": "AI_HACK_2026",
+        "invite_token": "inv_ai_hack_2026",
         "created_by": "Vikram Dev",
         "created_at": datetime.datetime.now().strftime("%Y-%m-%d"),
         "members": {
@@ -159,17 +161,73 @@ def init_group_state():
         st.session_state.active_group_id = group_ids[0] if group_ids else ""
 
 
+def find_group_by_token_or_code(token_or_code: str) -> Optional[Dict[str, Any]]:
+    """Search groups in session state by invite_token, group_id, or join_code."""
+    init_group_state()
+    if not token_or_code or not str(token_or_code).strip():
+        return None
+
+    clean_query = str(token_or_code).strip().lower()
+    clean_upper = str(token_or_code).strip().upper()
+
+    for g_id, g_data in st.session_state.my_groups.items():
+        inv_token = str(g_data.get("invite_token", "")).lower()
+        grp_id = str(g_data.get("group_id", "")).lower()
+        j_code = str(g_data.get("join_code", "")).upper()
+
+        if clean_query in (inv_token, grp_id) or clean_upper == j_code or g_id.lower() == clean_query:
+            return g_data
+    return None
+
+
+def join_existing_group(group_id: str, user_name: str) -> Tuple[bool, str]:
+    """Join an existing group without creating a new group."""
+    init_group_state()
+    group = st.session_state.my_groups.get(group_id)
+    if not group:
+        return False, "Group not found or has been deleted."
+
+    if user_name not in group["members"]:
+        group["members"][user_name] = {
+            "username": user_name,
+            "points": 0,
+            "quizzes_taken": 0,
+            "correct_answers": 0,
+            "coins_earned": 0
+        }
+        group["group_chat_messages"].append({
+            "role": "assistant",
+            "sender": "EduMind AI",
+            "content": f"👋 **{user_name}** joined the group!"
+        })
+    st.session_state.active_group_id = group_id
+    return True, f"🎉 You joined **{group['group_name']}** successfully!"
+
+
+def regenerate_invite_token(group_id: str) -> Optional[str]:
+    """Generate a new secure invite token for the group owner."""
+    init_group_state()
+    group = st.session_state.my_groups.get(group_id)
+    if not group:
+        return None
+    new_token = f"inv_{uuid.uuid4().hex[:8]}"
+    group["invite_token"] = new_token
+    return new_token
+
+
 def create_new_group(group_name: str, subject: str, creator_name: str) -> str:
-    """Create a new study group and add creator as first member."""
+    """Create a new study group with unique group_id, join_code, and invite_token."""
     init_group_state()
     join_code = generate_join_code(group_name)
-    group_id = join_code
+    group_id = f"grp_{uuid.uuid4().hex[:8]}"
+    invite_token = f"inv_{uuid.uuid4().hex[:8]}"
 
     new_group = {
         "group_id": group_id,
         "group_name": group_name.strip(),
         "subject": subject.strip(),
         "join_code": join_code,
+        "invite_token": invite_token,
         "created_by": creator_name,
         "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "members": {
@@ -194,39 +252,28 @@ def create_new_group(group_name: str, subject: str, creator_name: str) -> str:
 
 
 def join_group_by_code(join_code: str, user_name: str) -> Tuple[bool, str]:
-    """Join an existing study group using join code."""
+    """Join an existing study group using join code or invite token."""
     init_group_state()
-    code_clean = join_code.strip().upper()
+    code_clean = join_code.strip()
 
     if not code_clean:
-        return False, "Please enter a valid group code."
+        return False, "Please enter a valid group code or invite link."
 
-    for g_id, g_data in st.session_state.my_groups.items():
-        if g_data.get("join_code", "").upper() == code_clean or g_id.upper() == code_clean:
-            if user_name not in g_data["members"]:
-                g_data["members"][user_name] = {
-                    "username": user_name,
-                    "points": 0,
-                    "quizzes_taken": 0,
-                    "correct_answers": 0,
-                    "coins_earned": 0
-                }
-                g_data["group_chat_messages"].append({
-                    "role": "assistant",
-                    "sender": "EduMind AI",
-                    "content": f"👋 **{user_name}** joined the group!"
-                })
-            st.session_state.active_group_id = g_id
-            return True, f"Joined **{g_data['group_name']}** successfully!"
+    found_group = find_group_by_token_or_code(code_clean)
+    if found_group:
+        return join_existing_group(found_group["group_id"], user_name)
 
-    # Create new joined group if custom code provided
-    new_group_name = f"Group ({code_clean})"
-    g_id = code_clean
+    # Create new joined group if custom code provided and not found
+    code_upper = code_clean.upper()
+    new_group_name = f"Group ({code_upper})"
+    g_id = f"grp_{uuid.uuid4().hex[:8]}"
+    inv_tok = f"inv_{uuid.uuid4().hex[:8]}"
     new_group = {
         "group_id": g_id,
         "group_name": new_group_name,
         "subject": "General Studies",
-        "join_code": code_clean,
+        "join_code": code_upper,
+        "invite_token": inv_tok,
         "created_by": "Study Friend",
         "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "members": {

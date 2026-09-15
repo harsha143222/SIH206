@@ -7,7 +7,7 @@ chat history, quiz results, learning progress, and group data.
 import sqlite3
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 import config
 
@@ -27,17 +27,29 @@ def init_db() -> None:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Users table
+        # Users table with email and password_hash support
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT,
+                password_hash TEXT,
                 coin_balance INTEGER DEFAULT 100,
                 streak_days INTEGER DEFAULT 1,
                 last_active_date TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Ensure optional columns exist if table was created earlier
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "email" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        if "password_hash" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "display_name" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN display_name TEXT")
 
         # Subjects table
         cursor.execute("""
@@ -113,15 +125,28 @@ def init_db() -> None:
             )
         """)
 
-        # Study Groups
+        # Coin Transactions
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS study_groups (
-                group_id TEXT PRIMARY KEY,
-                group_name TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                join_code TEXT UNIQUE NOT NULL,
-                created_by TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS coin_transactions (
+                transaction_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                tx_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                source TEXT NOT NULL,
+                reference_id TEXT,
+                balance_after INTEGER NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # User Achievements
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                user_id TEXT NOT NULL,
+                achievement_id TEXT NOT NULL,
+                unlocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, achievement_id)
             )
         """)
 
@@ -130,25 +155,35 @@ def init_db() -> None:
 
 
 # User profile functions
-def save_user_profile(user_id: str, username: str, coin_balance: int, streak_days: int, last_active_date: str) -> None:
+def save_user_profile(user_id: str, username: str, coin_balance: int, streak_days: int, last_active_date: str, email: str = "", password_hash: str = "", display_name: str = "") -> None:
     with get_connection() as conn:
         conn.execute("""
-            INSERT INTO users (user_id, username, coin_balance, streak_days, last_active_date, updated_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO users (user_id, username, display_name, email, password_hash, coin_balance, streak_days, last_active_date, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id) DO UPDATE SET
                 username = excluded.username,
+                display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE users.display_name END,
+                email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
+                password_hash = CASE WHEN excluded.password_hash != '' THEN excluded.password_hash ELSE users.password_hash END,
                 coin_balance = excluded.coin_balance,
                 streak_days = excluded.streak_days,
                 last_active_date = excluded.last_active_date,
                 updated_at = CURRENT_TIMESTAMP
-        """, (user_id, username, coin_balance, streak_days, last_active_date))
+        """, (user_id, username, display_name or username, email, password_hash, coin_balance, streak_days, last_active_date))
         conn.commit()
 
 
-def get_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
+def get_user_profile(identifier: str) -> Optional[Dict[str, Any]]:
+    """Retrieve user profile by user_id, username, or email."""
+    if not identifier:
+        return None
+    clean_id = identifier.strip().lower()
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("""
+            SELECT * FROM users 
+            WHERE user_id = ? OR LOWER(username) = ? OR LOWER(email) = ?
+        """, (identifier.strip(), clean_id, clean_id))
         row = cursor.fetchone()
         return dict(row) if row else None
 
@@ -219,6 +254,52 @@ def save_quiz_result(attempt_id: str, user_id: str, subject: str, title: str, sc
                 report_json = excluded.report_json
         """, (attempt_id, user_id, subject, title, score, total, pct, coins, json.dumps(report)))
         conn.commit()
+
+
+# Coin Transaction functions
+def save_transaction(user_id: str, tx: Dict[str, Any]) -> None:
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO coin_transactions (transaction_id, user_id, amount, tx_type, reason, source, reference_id, balance_after, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(transaction_id) DO NOTHING
+        """, (
+            tx["transaction_id"],
+            user_id,
+            tx["amount"],
+            tx["type"],
+            tx["reason"],
+            tx["source"],
+            tx.get("reference_id", ""),
+            tx["balance_after"],
+            tx.get("timestamp")
+        ))
+        conn.commit()
+
+
+def get_user_transactions(user_id: str) -> List[Dict[str, Any]]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM coin_transactions WHERE user_id = ? ORDER BY timestamp DESC", (user_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+# Achievement functions
+def save_achievement(user_id: str, achievement_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO user_achievements (user_id, achievement_id)
+            VALUES (?, ?)
+            ON CONFLICT(user_id, achievement_id) DO NOTHING
+        """, (user_id, achievement_id))
+        conn.commit()
+
+
+def get_unlocked_achievements(user_id: str) -> Set[str]:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT achievement_id FROM user_achievements WHERE user_id = ?", (user_id,))
+        return {row["achievement_id"] for row in cursor.fetchall()}
 
 
 # Initialize database on module load

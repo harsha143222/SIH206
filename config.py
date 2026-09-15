@@ -24,9 +24,50 @@ INDEXES_DIR = DATA_DIR / "indexes"
 DB_DIR = DATA_DIR / "database"
 DB_PATH = DB_DIR / "edumind.db"
 
-# Create directories if they do not exist
-for folder in [DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, INDEXES_DIR, DB_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
+DEFAULT_SUBJECT = "General Computer Science"
+
+# User-specific paths
+def get_user_upload_dir(user_id: str) -> Path:
+    """Return user-specific upload directory data/uploads/{user_id}/"""
+    sanitized_id = "".join(c for c in str(user_id) if c.isalnum() or c in ("-", "_")) or "user_default"
+    user_dir = UPLOADS_DIR / sanitized_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    return user_dir
+
+def get_user_index_dir(user_id: str, subject: str = DEFAULT_SUBJECT) -> Path:
+    """Return user-specific FAISS index directory data/indexes/{user_id}/{subject}/"""
+    sanitized_id = "".join(c for c in str(user_id) if c.isalnum() or c in ("-", "_")) or "user_default"
+    sanitized_subj = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(subject)) or "general"
+    idx_dir = INDEXES_DIR / sanitized_id / sanitized_subj
+    idx_dir.mkdir(parents=True, exist_ok=True)
+    return idx_dir
+
+def get_mongodb_uri() -> str:
+    """Retrieve MONGODB_URI from environment variables or Streamlit secrets."""
+    uri = os.getenv("MONGODB_URI", "").strip()
+    if not uri or uri == "your_mongodb_uri_here":
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "MONGODB_URI" in st.secrets:
+                uri = str(st.secrets["MONGODB_URI"]).strip()
+        except Exception:
+            pass
+    return uri
+
+def get_mongodb_database() -> str:
+    """Retrieve MONGODB_DATABASE name, defaulting to edumind."""
+    db_name = os.getenv("MONGODB_DATABASE", "").strip()
+    if not db_name:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "MONGODB_DATABASE" in st.secrets:
+                db_name = str(st.secrets["MONGODB_DATABASE"]).strip()
+        except Exception:
+            pass
+    return db_name if db_name else "edumind"
+
+MONGODB_URI = get_mongodb_uri()
+MONGODB_DATABASE = get_mongodb_database()
 
 # ==============================================================================
 # 2. API & MODEL CONFIGURATION (OFFICIAL GOOGLE GENAI SDK)

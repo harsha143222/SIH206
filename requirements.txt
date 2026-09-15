@@ -6,3 +6,7 @@ python-pptx>=1.0.0
 faiss-cpu>=1.7.4
 numpy>=1.25.0
 pillow>=10.0.0
+pymongo>=4.6.0
+dnspython>=2.6.0
+bcrypt>=4.1.0
+werkzeug>=3.0.0

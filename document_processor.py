@@ -14,7 +14,12 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-import faiss
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    faiss = None
+    FAISS_AVAILABLE = False
 
 import config
 import database
@@ -34,38 +39,58 @@ class FileSizeExceededError(DocumentProcessingError):
 
 
 # ==============================================================================
-# 1. SUBJECT-ISOLATED FAISS VECTOR STORE
+# 1. SUBJECT-ISOLATED FAISS / NUMPY VECTOR STORE
 # ==============================================================================
 class SubjectVectorStore:
     """
-    Manages vector embeddings and chunk metadata isolated by Subject using FAISS.
-    Guarantees that querying subject 'Java' only retrieves Java materials.
+    Manages vector embeddings and chunk metadata isolated by Subject and User ID using FAISS
+    with a graceful Numpy Cosine Similarity fallback if FAISS is unavailable.
+    Guarantees that querying subject 'Java' only retrieves Java materials for that specific student.
     """
 
-    def __init__(self, subject: str, dimension: int = 768):
+    def __init__(self, subject: str, dimension: int = 768, user_id: str = "user_default"):
         self.subject: str = subject.strip().title()
         self.dimension: int = dimension
-        self.sanitized_name: str = re.sub(r"[^\w\-]", "_", self.subject.lower())
-        self.index_path: Path = config.INDEXES_DIR / f"{self.sanitized_name}.faiss"
-        self.meta_path: Path = config.INDEXES_DIR / f"{self.sanitized_name}_meta.json"
+        self.user_id: str = str(user_id)
+        
+        idx_dir = config.get_user_index_dir(self.user_id, self.subject)
+        self.index_path: Path = idx_dir / "index.faiss"
+        self.meta_path: Path = idx_dir / "meta.json"
+        self.emb_path: Path = idx_dir / "emb.npy"
 
-        self.index: Optional[faiss.IndexFlatIP] = None
+        self.index: Optional[Any] = None
+        self.embeddings_matrix: Optional[np.ndarray] = None
         self.chunks: List[Dict[str, Any]] = []
         self._load_or_create()
 
     def _load_or_create(self) -> None:
-        """Load existing index from disk or initialize new FAISS IndexFlatIP."""
-        if self.index_path.exists() and self.meta_path.exists():
+        """Load existing index from disk or initialize new FAISS / Numpy store."""
+        if FAISS_AVAILABLE and self.index_path.exists() and self.meta_path.exists():
             try:
                 self.index = faiss.read_index(str(self.index_path))
                 with open(self.meta_path, "r", encoding="utf-8") as f:
                     self.chunks = json.load(f)
-                logger.info("Loaded vector index for subject '%s' (%d chunks)", self.subject, len(self.chunks))
+                logger.info("Loaded FAISS vector index for subject '%s' (%d chunks)", self.subject, len(self.chunks))
                 return
             except Exception as e:
-                logger.warning("Error loading index for subject '%s': %s. Rebuilding.", self.subject, str(e))
+                logger.warning("Error loading FAISS index for subject '%s': %s. Rebuilding.", self.subject, str(e))
 
-        self.index = faiss.IndexFlatIP(self.dimension)
+        # Fallback to Numpy embedding matrix
+        if self.emb_path.exists() and self.meta_path.exists():
+            try:
+                self.embeddings_matrix = np.load(str(self.emb_path))
+                with open(self.meta_path, "r", encoding="utf-8") as f:
+                    self.chunks = json.load(f)
+                logger.info("Loaded Numpy vector store for subject '%s' (%d chunks)", self.subject, len(self.chunks))
+                return
+            except Exception as e:
+                logger.warning("Error loading Numpy store for subject '%s': %s.", self.subject, str(e))
+
+        if FAISS_AVAILABLE:
+            try:
+                self.index = faiss.IndexFlatIP(self.dimension)
+            except Exception:
+                self.index = None
         self.chunks = []
 
     def add_chunks(self, new_chunks: List[Dict[str, Any]], embeddings: List[List[float]]) -> None:
@@ -79,24 +104,37 @@ class SubjectVectorStore:
         norms[norms == 0] = 1.0
         matrix = matrix / norms
 
-        if self.index is None:
-            self.index = faiss.IndexFlatIP(matrix.shape[1])
+        if FAISS_AVAILABLE:
+            if self.index is None:
+                self.index = faiss.IndexFlatIP(matrix.shape[1])
+            self.index.add(matrix)
 
-        self.index.add(matrix)
+        if self.embeddings_matrix is None:
+            self.embeddings_matrix = matrix
+        else:
+            self.embeddings_matrix = np.vstack([self.embeddings_matrix, matrix])
+
         self.chunks.extend(new_chunks)
         self._save()
 
     def _save(self) -> None:
         """Persist index and chunk metadata to disk."""
         config.INDEXES_DIR.mkdir(parents=True, exist_ok=True)
-        if self.index is not None:
-            faiss.write_index(self.index, str(self.index_path))
+        if FAISS_AVAILABLE and self.index is not None:
+            try:
+                faiss.write_index(self.index, str(self.index_path))
+            except Exception as e:
+                logger.warning("Failed to save FAISS index: %s", str(e))
+
+        if self.embeddings_matrix is not None:
+            np.save(str(self.emb_path), self.embeddings_matrix)
+
         with open(self.meta_path, "w", encoding="utf-8") as f:
             json.dump(self.chunks, f, indent=2)
 
     def search(self, query_embedding: List[float], top_k: int = config.TOP_K) -> List[Dict[str, Any]]:
         """Perform semantic search using query vector."""
-        if self.index is None or self.index.ntotal == 0 or not self.chunks:
+        if not self.chunks:
             return []
 
         q_vec = np.array([query_embedding], dtype="float32")
@@ -104,29 +142,47 @@ class SubjectVectorStore:
         if norm > 0:
             q_vec = q_vec / norm
 
-        k = min(top_k, self.index.ntotal)
-        distances, indices = self.index.search(q_vec, k)
+        # 1. Use FAISS if available and loaded
+        if FAISS_AVAILABLE and self.index is not None and self.index.ntotal > 0:
+            k = min(top_k, self.index.ntotal)
+            distances, indices = self.index.search(q_vec, k)
 
-        results = []
-        for idx_pos, chunk_idx in enumerate(indices[0]):
-            if 0 <= chunk_idx < len(self.chunks):
-                chunk = dict(self.chunks[chunk_idx])
-                chunk["score"] = float(distances[0][idx_pos])
-                results.append(chunk)
+            results = []
+            for idx_pos, chunk_idx in enumerate(indices[0]):
+                if 0 <= chunk_idx < len(self.chunks):
+                    chunk = dict(self.chunks[chunk_idx])
+                    chunk["score"] = float(distances[0][idx_pos])
+                    results.append(chunk)
+            return results
 
-        return results
+        # 2. Fallback to Numpy Cosine Similarity Matrix Search
+        if self.embeddings_matrix is not None and len(self.embeddings_matrix) > 0:
+            scores = np.dot(self.embeddings_matrix, q_vec.T).flatten()
+            k = min(top_k, len(scores))
+            top_indices = np.argsort(scores)[::-1][:k]
+
+            results = []
+            for idx in top_indices:
+                if 0 <= idx < len(self.chunks):
+                    chunk = dict(self.chunks[idx])
+                    chunk["score"] = float(scores[idx])
+                    results.append(chunk)
+            return results
+
+        return []
 
 
 # Cache of loaded vector stores by subject
 _VECTOR_STORES: Dict[str, SubjectVectorStore] = {}
 
 
-def get_subject_vector_store(subject: str) -> SubjectVectorStore:
-    """Retrieve or create the subject-isolated vector store."""
+def get_subject_vector_store(subject: str, user_id: str = "user_default") -> SubjectVectorStore:
+    """Retrieve or create the user-and-subject isolated vector store."""
     subj_norm = subject.strip().title()
-    if subj_norm not in _VECTOR_STORES:
-        _VECTOR_STORES[subj_norm] = SubjectVectorStore(subj_norm)
-    return _VECTOR_STORES[subj_norm]
+    key = f"{user_id}_{subj_norm}"
+    if key not in _VECTOR_STORES:
+        _VECTOR_STORES[key] = SubjectVectorStore(subj_norm, user_id=user_id)
+    return _VECTOR_STORES[key]
 
 
 # ==============================================================================
@@ -135,12 +191,13 @@ def get_subject_vector_store(subject: str) -> SubjectVectorStore:
 def process_uploaded_file(
     file_bytes: bytes,
     filename: str,
-    subject: str = config.DEFAULT_SUBJECT
+    subject: str = config.DEFAULT_SUBJECT,
+    user_id: str = "user_default"
 ) -> Dict[str, Any]:
     """
     Parse uploaded PDF, PPT, or PPTX bytes up to MAX_FILE_SIZE_MB.
     Extracts complete text, performs chunking with page/slide metadata,
-    generates embeddings, and registers in subject vector index and SQLite DB.
+    generates embeddings, and registers in subject vector index, MongoDB Atlas, and SQLite DB.
     """
     file_size_bytes = len(file_bytes)
     file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
@@ -161,8 +218,9 @@ def process_uploaded_file(
     doc_id = f"doc_{file_hash[:12]}"
     subj_norm = subject.strip().title()
 
-    # Save raw file to uploads directory
-    saved_file_path = config.UPLOADS_DIR / f"{doc_id}_{filename}"
+    # Save raw file to user-specific uploads directory data/uploads/{user_id}/
+    user_upload_dir = config.get_user_upload_dir(user_id)
+    saved_file_path = user_upload_dir / f"{doc_id}_{filename}"
     with open(saved_file_path, "wb") as f:
         f.write(file_bytes)
 
@@ -180,12 +238,13 @@ def process_uploaded_file(
     chunk_texts = [c["text"] for c in chunks]
     embeddings = gemini_client.generate_embeddings(chunk_texts) if chunk_texts else []
 
-    # Store in subject vector index
+    # Store in user-specific subject vector index
     if chunks and embeddings:
-        v_store = get_subject_vector_store(subj_norm)
+        v_store = get_subject_vector_store(subj_norm, user_id=user_id)
         v_store.add_chunks(chunks, embeddings)
 
     doc_data = {
+        "user_id": str(user_id),
         "doc_id": doc_id,
         "filename": filename,
         "file_hash": file_hash,
@@ -201,11 +260,13 @@ def process_uploaded_file(
     with open(processed_path, "w", encoding="utf-8") as f:
         json.dump(doc_data, f, indent=2)
 
+    import mongodb
+    mongodb.save_document(user_id, doc_data, str(saved_file_path))
     database.save_document_record(doc_data, str(saved_file_path))
 
     logger.info(
-        "Processed and indexed %s for subject '%s' (%s MB, %d chunks)",
-        filename, subj_norm, file_size_mb, len(chunks)
+        "Processed and indexed %s for user '%s' subject '%s' (%s MB, %d chunks)",
+        filename, user_id, subj_norm, file_size_mb, len(chunks)
     )
     return doc_data
 
@@ -305,10 +366,11 @@ def search_documents(
     documents: Optional[List[Dict[str, Any]]] = None,
     query: str = "",
     subject: str = config.DEFAULT_SUBJECT,
-    top_k: int = config.TOP_K
+    top_k: int = config.TOP_K,
+    user_id: str = "user_default"
 ) -> List[Dict[str, Any]]:
     """
-    Perform semantic search for query within course materials isolated by subject.
+    Perform semantic search for query within course materials isolated by subject and user.
     Returns the top_k matching chunks with full source metadata.
     """
     if not query or not query.strip():
@@ -317,7 +379,7 @@ def search_documents(
     subj_norm = subject.strip().title()
 
     # Query subject vector store first
-    v_store = get_subject_vector_store(subj_norm)
+    v_store = get_subject_vector_store(subj_norm, user_id=user_id)
     query_embeddings = gemini_client.generate_embeddings([query])
 
     if query_embeddings and v_store.chunks:
