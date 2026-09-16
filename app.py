@@ -6,6 +6,8 @@ Smart Education Assistant | Smart India Hackathon 2026 (Problem Statement ID 262
 
 import os
 import datetime
+import secrets
+import time
 import streamlit as st
 import config
 import database
@@ -650,9 +652,9 @@ with st.sidebar:
         "📊 Student Dashboard",
         "📊 My Analytics",
         "🏠 Home / Individual Learning",
+        "👥 Study Spaces",
         "🎯 Aptitude Practice",
         "🎮 Educational Games",
-        "👥 Friends Dashboard",
         "👤 Profile & Analytics",
         "⚙️ Settings & Voice",
         "📊 Admin Analytics"
@@ -1453,514 +1455,690 @@ def render_games_section():
                         st.rerun()
 
 # ==============================================================================
-# 7. FRIENDS & GROUP LEARNING DASHBOARD RENDERER
+# FEATURE 1 — AUTOMATIC MATERIAL OVERVIEW & MATERIAL-SPECIFIC QUIZ UI
 # ==============================================================================
-def render_friends_dashboard():
-    try:
-        group_learning.init_group_state()
+def render_material_overview_card(doc_data: Dict[str, Any]):
+    """
+    Render Feature 1: Automatic Material Overview + Grounded Material Quiz buttons.
+    """
+    if not doc_data or not isinstance(doc_data, dict):
+        return
 
-        st.subheader("👥 Friends & Group Learning System")
-        st.caption("Learn together with friends, ask EduMind AI in group chat, share notes, take group quizzes, and compete on the group leaderboard!")
+    ov = doc_data.get("overview")
+    if not ov:
+        ov = database.get_material_overview(doc_data.get("doc_id", ""))
+    if not ov:
+        ov = {
+            "document_title": doc_data.get("filename", "Uploaded Material"),
+            "subject": doc_data.get("subject", config.DEFAULT_SUBJECT),
+            "total_units": doc_data.get("total_units", 1),
+            "main_topics": ["General Overview"],
+            "key_concepts": ["Course Notes"],
+            "recommended_order": ["1. Review material"],
+            "exam_points": ["Key concepts in document"]
+        }
 
-        # Newly Created Group Banner
-        just_created_id = st.session_state.get("just_created_group_id")
-        if just_created_id and just_created_id in st.session_state.my_groups:
-            c_grp = st.session_state.my_groups[just_created_id]
-            c_tok = c_grp.get("invite_token", c_grp["group_id"])
-            c_link = f"http://localhost:8501/?join_group={c_tok}"
+    title = ov.get("document_title") or doc_data.get("filename", "Study Material")
+    subject = ov.get("subject") or doc_data.get("subject", config.DEFAULT_SUBJECT)
+    total_units = ov.get("total_units") or doc_data.get("total_units", 1)
+    file_type = doc_data.get("file_type", "PDF/PPT")
+    unit_label = "Slides" if str(file_type).upper() in ["PPT", "PPTX"] else "Pages"
 
-            st.markdown(
-                f"""
-                <div style="background-color: rgba(16, 185, 129, 0.1); border: 2px solid #10B981; border-radius: 14px; padding: 1.5rem; margin-bottom: 1.2rem;">
-                    <h3 style="color: #065F46; margin-top: 0; margin-bottom: 0.5rem;">🎉 Study Group Created!</h3>
-                    <div style="font-size: 1.25rem; font-weight: 700; color: #047857; margin-bottom: 0.4rem;">
-                        👥 {c_grp['group_name']}
-                    </div>
-                    <div style="margin-bottom: 0.3rem;">📚 Subject: <b>{c_grp['subject']}</b></div>
-                    <div style="margin-bottom: 0.3rem;">👥 Members: <b>{len(c_grp['members'])}</b></div>
-                    <div style="margin-bottom: 0.6rem;">🔑 Join Code: <code>{c_grp['join_code']}</code></div>
-                    <div style="font-weight: 600; margin-bottom: 0.3rem;">🔗 Invite Link:</div>
+    main_topics = ov.get("main_topics", [])
+    key_concepts = ov.get("key_concepts", [])
+    rec_order = ov.get("recommended_order", [])
+    exam_points = ov.get("exam_points", [])
+
+    st.markdown(
+        f"""
+        <div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%); border: 1.5px solid rgba(99, 102, 241, 0.45); border-radius: 16px; padding: 1.4rem; margin-bottom: 1.2rem; box-shadow: 0 8px 25px rgba(0, 0, 0, 0.35);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.9rem; border-bottom: 1px solid rgba(148, 163, 184, 0.2); padding-bottom: 0.6rem;">
+                <div>
+                    <h3 style="color: #60A5FA; margin: 0; font-size: 1.3rem;">📄 {title}</h3>
+                    <div style="font-size: 0.88rem; color: #94A3B8; margin-top: 0.2rem;">Subject: <b>{subject}</b> • <b>{total_units} {unit_label}</b> parsed & indexed</div>
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
-            st.code(c_link, language=None)
-            render_share_invite_buttons(c_tok, c_grp['group_name'], key_suffix="just_created")
-            
-            if st.button("Open Group", type="primary", key="btn_open_just_created"):
-                st.session_state.active_group_id = just_created_id
-                st.session_state.just_created_group_id = None
-                st.rerun()
-
-            st.markdown("---")
-
-        groups_dict = st.session_state.my_groups
-        group_ids = list(groups_dict.keys())
-
-        col_sel, col_create, col_join = st.columns([2, 1, 1])
-
-        with col_sel:
-            current_g_id = st.session_state.active_group_id
-            if current_g_id not in group_ids and group_ids:
-                current_g_id = group_ids[0]
-                st.session_state.active_group_id = current_g_id
-
-            selected_g_id = st.selectbox(
-                "Active Study Group",
-                options=group_ids,
-                format_func=lambda gid: f"👥 {groups_dict[gid]['group_name']} ({groups_dict[gid]['subject']})",
-                index=group_ids.index(current_g_id) if current_g_id in group_ids else 0,
-                key="friends_group_select_box"
-            )
-            if selected_g_id != st.session_state.active_group_id:
-                st.session_state.active_group_id = selected_g_id
-                st.rerun()
-
-        with col_create:
-            with st.popover("➕ Create Group"):
-                st.markdown("### ➕ Create Study Group")
-                g_name = st.text_input("Group Name", value="C++ Wizards", key="pop_g_name")
-                g_subj = st.text_input("Subject", value="C++ Programming", key="pop_g_subj")
-                u_handle = st.text_input("Your Handle", value=st.session_state.user_name, key="pop_u_handle")
-                if st.button("Create Group Now", type="primary", key="pop_btn_create"):
-                    if g_name.strip() and g_subj.strip() and u_handle.strip():
-                        st.session_state.user_name = u_handle.strip()
-                        new_id = group_learning.create_new_group(g_name, g_subj, st.session_state.user_name)
-                        st.session_state.just_created_group_id = new_id
-                        st.success(f"Study group created successfully! ID: `{new_id}`")
-                        st.rerun()
-                    else:
-                        st.warning("Please enter Group Name, Subject, and Handle.")
-
-        with col_join:
-            with st.popover("🔗 Join Group"):
-                st.markdown("### 🔗 Join Study Group")
-                code_in = st.text_input("Enter Join Code or Invite Link", value="", key="pop_join_code")
-                u_handle_join = st.text_input("Your Handle", value=st.session_state.user_name, key="pop_join_handle")
-                if st.button("Join Group Now", type="primary", key="pop_btn_join"):
-                    if code_in.strip() and u_handle_join.strip():
-                        st.session_state.user_name = u_handle_join.strip()
-                        ok, msg = group_learning.join_group_by_code(code_in, st.session_state.user_name)
-                        if ok:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    else:
-                        st.warning("Please enter Group Code/Link and Handle.")
-
-        active_group = st.session_state.my_groups.get(st.session_state.active_group_id)
-        if not active_group:
-            st.info("No active study group. Create or join one above!")
-            return
-
-        inv_token = active_group.get("invite_token", active_group["group_id"])
-        inv_url = f"http://localhost:8501/?join_group={inv_token}"
-
-        st.markdown(
-            f"""
-            <div class="quiz-card" style="margin-top: 0.4rem; margin-bottom: 0.8rem;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <span style="font-size: 1.25rem; font-weight: 700; color: #1E3A8A;">👥 {active_group['group_name']}</span>
-                    <span class="badge-pill badge-coins">Created by: {active_group['created_by']}</span>
+                <div>
+                    <span class="badge-pill badge-strong">● AI Overview Generated</span>
                 </div>
-                <span class="topic-badge badge-learned">Subject: <b>{active_group['subject']}</b></span>
-                <span class="topic-badge badge-strong">🔑 Join Code: <code>{active_group['join_code']}</code></span>
-                <span class="topic-badge badge-practice">Members: 👥 {len(active_group['members'])}</span>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
 
-        with st.expander("🔗 Shareable Group Invite Link", expanded=False):
-            st.markdown("Share this invite link with your friends to let them join this exact study group:")
-            st.code(inv_url, language=None)
-            render_share_invite_buttons(inv_token, active_group['group_name'], key_suffix=f"active_{active_group['group_id']}")
-            
-            if active_group.get("created_by") == st.session_state.user_name:
-                st.markdown("---")
-                if st.button("🔄 Regenerate Invite Link", key=f"btn_regen_{active_group['group_id']}"):
-                    new_tok = group_learning.regenerate_invite_token(active_group["group_id"])
-                    if new_tok:
-                        st.success(f"New invite link generated! Old link is now invalid.")
-                        st.rerun()
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 0.8rem;">
+                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                    <h4 style="color: #818CF8; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">📌 Main Topics:</h4>
+                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                        {"".join(f"<li><b>{t}</b></li>" for t in main_topics)}
+                    </ul>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                    <h4 style="color: #34D399; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">💡 Key Concepts:</h4>
+                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                        {"".join(f"<li>{c}</li>" for c in key_concepts)}
+                    </ul>
+                </div>
+            </div>
 
-        tab_chat, tab_docs, tab_together, tab_gquiz, tab_lead, tab_analytics = st.tabs([
-            "💬 Group Chat",
-            "📚 Shared Materials",
-            "🧠 Learn Together",
-            "📝 Group Quiz",
-            "🏆 Group Leaderboard",
-            "📊 Group Progress"
-        ])
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                    <h4 style="color: #FBBF24; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🗺️ Recommended Learning Order:</h4>
+                    <ol style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                        {"".join(f"<li>{o}</li>" for o in rec_order)}
+                    </ol>
+                </div>
+                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                    <h4 style="color: #F87171; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🎯 Important Exam Points:</h4>
+                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                        {"".join(f"<li>{p}</li>" for p in exam_points)}
+                    </ul>
+                </div>
+            </div>
 
-        with tab_chat:
-            st.markdown("### 💬 Group Chat & AI Tutor")
-            st.caption("Ask questions, discuss topics with group members, or request EduMind AI's explanation.")
+            <div style="background: rgba(99, 102, 241, 0.18); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 14px; padding: 0.9rem; text-align: center;">
+                <h4 style="color: #F8FAFC; margin: 0 0 0.3rem 0;">Ready to test your understanding?</h4>
+                <div style="color: #CBD5E1; font-size: 0.85rem;">Generate a personalized quiz grounded ONLY in this uploaded material.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-            chat_messages = active_group.get("group_chat_messages", [])
-            for idx, msg in enumerate(chat_messages):
-                sender = msg.get("sender", "Member")
-                role = msg.get("role", "user")
-                avatar = "🎓" if role == "assistant" else "👤"
+    doc_key = doc_data.get("doc_id", f"doc_{hash(title)}")
 
-                with st.chat_message(role, avatar=avatar):
-                    st.markdown(f"**{sender}**: {msg['content']}")
-                    if role == "assistant":
-                        voice_engine.render_voice_button(
-                            msg['content'],
-                            button_id=f"g_chat_msg_{idx}",
-                            voice_gender=st.session_state.selected_voice_gender
-                        )
+    col_q1, col_q2 = st.columns([1, 1])
+    with col_q1:
+        num_q_sel = st.selectbox("Number of Questions", options=[5, 10, 20], index=0, key=f"num_q_sel_{doc_key}")
+    with col_q2:
+        diff_sel = st.selectbox("Difficulty Level", options=["Mixed", "Easy", "Medium", "Hard"], index=0, key=f"diff_sel_{doc_key}")
 
-            st.markdown("---")
-            g_prompt = st.text_input("Type your group message or doubt:", key=f"g_chat_input_{active_group['group_id']}")
-
-            g_col1, g_col2 = st.columns([1, 1])
-            with g_col1:
-                if st.button("💬 Post Message to Group", use_container_width=True):
-                    if g_prompt and g_prompt.strip():
-                        group_learning.add_group_chat_message(
-                            group_id=active_group["group_id"],
-                            sender=st.session_state.user_name,
-                            role="user",
-                            content=g_prompt.strip()
-                        )
-                        st.rerun()
-
-            with g_col2:
-                if st.button("🤖 Ask EduMind AI in Group", use_container_width=True, type="primary"):
-                    user_msg = g_prompt.strip() if g_prompt else "Explain the core concepts from our shared group notes."
-                    group_learning.add_group_chat_message(
-                        group_id=active_group["group_id"],
-                        sender=st.session_state.user_name,
-                        role="user",
-                        content=user_msg
+    btn_cq1, btn_cq2, btn_cq3 = st.columns(3)
+    with btn_cq1:
+        if st.button("📝 Start Quiz From This Material", type="primary", use_container_width=True, key=f"btn_quiz_mat_{doc_key}"):
+            with st.spinner("Generating grounded material quiz via Gemini..."):
+                try:
+                    mat_quiz = quiz_engine.generate_material_specific_quiz(
+                        doc_data=doc_data,
+                        subject=subject,
+                        num_questions=num_q_sel,
+                        difficulty=diff_sel
                     )
-                    with st.spinner("🤖 EduMind AI is analyzing group context via Gemini..."):
-                        try:
-                            g_docs = active_group.get("group_documents", [])
-                            g_docs_context = document_processor.format_context_for_prompt(g_docs) if g_docs else ""
-                            ai_resp = gemini_client.generate_group_explanation(
-                                group_name=active_group["group_name"],
-                                subject=active_group["subject"],
-                                chat_history_summary=user_msg,
-                                user_doubt=user_msg,
-                                shared_document_context=g_docs_context
-                            )
-                            group_learning.add_group_chat_message(
-                                group_id=active_group["group_id"],
-                                sender="EduMind AI",
-                                role="assistant",
-                                content=ai_resp
-                            )
+                    st.session_state.current_quiz = mat_quiz
+                    st.session_state.quiz_mode = True
+                    st.session_state.quiz_answers = {}
+                    st.session_state.quiz_hints_used = {}
+                    st.session_state.quiz_submitted = False
+                    st.session_state.quiz_index = 0
+                    st.rerun()
+                except quiz_engine.GroundedQuizError as e:
+                    st.warning(f"⚠️ {str(e)}")
+                except Exception as e:
+                    st.error(f"Failed to generate quiz: {str(e)}")
 
-                            top_n, sub_n = learning_tracker.heuristic_topic_extractor(user_msg)
-                            learning_tracker.record_learned_topic(
-                                registry=active_group["learned_topics"],
-                                topic_name=top_n,
-                                subtopic_name=sub_n,
-                                subject=active_group["subject"],
-                                user_question=user_msg,
-                                source="Group Shared Notes",
-                                explanation=ai_resp
-                            )
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error getting AI answer: {str(e)}")
+    with btn_cq2:
+        if st.button("Start 5 Question Quiz", use_container_width=True, key=f"btn_q5_{doc_key}"):
+            with st.spinner("Generating 5-question quiz..."):
+                try:
+                    mat_quiz = quiz_engine.generate_material_specific_quiz(
+                        doc_data=doc_data,
+                        subject=subject,
+                        num_questions=5,
+                        difficulty=diff_sel
+                    )
+                    st.session_state.current_quiz = mat_quiz
+                    st.session_state.quiz_mode = True
+                    st.session_state.quiz_answers = {}
+                    st.session_state.quiz_hints_used = {}
+                    st.session_state.quiz_submitted = False
+                    st.session_state.quiz_index = 0
+                    st.rerun()
+                except quiz_engine.GroundedQuizError as e:
+                    st.warning(f"⚠️ {str(e)}")
+                except Exception as e:
+                    st.error(f"Failed to generate quiz: {str(e)}")
 
-        with tab_docs:
-            st.markdown("### 📚 Group Shared Materials")
-            st.info("🔒 **Privacy Isolated**: Materials uploaded here are shared ONLY with members of this study group.")
+    with btn_cq3:
+        if st.button("Ask AI Doubts", use_container_width=True, key=f"btn_ask_doubts_{doc_key}"):
+            st.session_state.quiz_mode = False
+            st.session_state.pending_prompt = f"I have a doubt regarding the uploaded material '{title}'."
+            st.rerun()
 
-            group_files = st.file_uploader(
-                "Upload Group PDF, PPT or PPTX (Max 100 MB)",
-                type=config.SUPPORTED_FILE_TYPES,
-                accept_multiple_files=True,
-                key=f"group_doc_uploader_{active_group['group_id']}"
-            )
 
-            if group_files:
-                for file in group_files:
-                    already_in_group = any(d.get("title") == file.name for d in active_group["group_documents"])
-                    if not already_in_group:
-                        with st.spinner(f"📖 Uploading {file.name} to Group..."):
-                            try:
-                                file_bytes = file.read()
-                                doc_data = document_processor.process_uploaded_file(
-                                    file_bytes, file.name, subject=active_group["subject"]
-                                )
-                                doc_data["title"] = file.name
-                                doc_data["uploaded_by"] = st.session_state.user_name
-                                group_learning.add_group_document(active_group["group_id"], doc_data)
-                                st.success(f"✅ Added {file.name} to group shared notes!")
-                            except Exception as e:
-                                st.error(f"Failed to process {file.name}: {str(e)}")
+# ==============================================================================
+# FEATURE 2 — SHARED STUDY SPACE DASHBOARD RENDERER
+# ==============================================================================
+def render_study_spaces_page():
+    """
+    Feature 2 — Shared Study Space UI Implementation.
+    """
+    user_id = st.session_state.get("user_id", "user_default")
+    user_name = st.session_state.get("display_name", st.session_state.get("user_name", "Student"))
+    username = st.session_state.get("username", "student")
 
-            g_docs = active_group.get("group_documents", [])
-            if g_docs:
-                st.markdown("**Group Shared Notes & PDFs:**")
-                for doc in g_docs:
-                    title = doc.get("title") or doc.get("filename", "Shared Note")
-                    uploaded_by = doc.get("uploaded_by", "Group Member")
-                    total_units = doc.get("total_units", 1)
-                    st.markdown(f"- 📄 **`{title}`** (Uploaded by `{uploaded_by}` — {total_units} units)")
+    st.subheader("👥 Shared Study Spaces")
+    st.caption("Collaborate with peers, share study materials, ask the AI Tutor doubts, participate in group discussions, and take shared quizzes!")
+
+    # Check for invite token in URL or session state
+    invite_param = st.query_params.get("invite") or st.query_params.get("join_group")
+    if invite_param and "active_invite_processed" not in st.session_state:
+        space_inv = database.get_study_space_by_token(invite_param)
+        if space_inv:
+            is_mem = database.is_study_space_member(space_inv["space_id"], user_id)
+            if is_mem:
+                st.session_state["active_space_id"] = space_inv["space_id"]
+                st.session_state["active_invite_processed"] = True
             else:
-                st.caption("No shared group materials uploaded yet.")
+                st.markdown(
+                    f"""
+                    <div style="background: rgba(30, 41, 59, 0.95); border: 2px solid #60A5FA; border-radius: 16px; padding: 1.8rem; margin-bottom: 1.5rem;">
+                        <h2 style="color: #60A5FA; margin-top: 0;">👥 You've been invited to join a Study Space!</h2>
+                        <h3 style="color: #F8FAFC; margin-bottom: 0.4rem;">{space_inv['name']}</h3>
+                        <div style="color: #94A3B8; margin-bottom: 0.4rem;">📚 Subject: <b>{space_inv['subject']}</b></div>
+                        <div style="color: #94A3B8; margin-bottom: 0.4rem;">👤 Created by: <b>{space_inv['owner_username']}</b></div>
+                        <div style="color: #94A3B8; margin-bottom: 1rem;">📝 Description: {space_inv.get('description') or 'No description provided.'}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                c_j1, c_j2 = st.columns(2)
+                with c_j1:
+                    if st.button("➕ Join Study Space Now", type="primary", use_container_width=True):
+                        database.add_study_space_member(space_inv["space_id"], user_id, user_name, role="member")
+                        st.session_state["active_space_id"] = space_inv["space_id"]
+                        st.session_state["active_invite_processed"] = True
+                        if "invite" in st.query_params:
+                            del st.query_params["invite"]
+                        if "join_group" in st.query_params:
+                            del st.query_params["join_group"]
+                        st.success(f"🎉 Successfully joined '{space_inv['name']}'!")
+                        st.rerun()
+                with c_j2:
+                    if st.button("Dismiss", use_container_width=True):
+                        st.session_state["active_invite_processed"] = True
+                        st.rerun()
+                return
 
-        with tab_together:
-            st.markdown("### 🧠 Learn Together — Group Topics")
-            g_topics = active_group.get("learned_topics", {})
-            if g_topics:
-                for top_name, rec in g_topics.items():
-                    st.markdown(f"#### 📖 {top_name}")
-                    exp_text = getattr(rec, 'explanation', None) or f"Academic concept covering {getattr(rec, 'subtopic', 'General Concepts')}."
-                    st.write(exp_text)
-                    st.markdown("---")
-            else:
-                st.info("No group topics tracked yet. Ask doubts in Group Chat to start learning together!")
+    # Load User's Study Spaces from persistent SQLite DB
+    user_spaces = database.get_user_study_spaces(user_id)
 
-        with tab_gquiz:
-            st.markdown("### 📝 Group Quiz")
-            active_g_quiz_data = active_group.get("active_group_quiz")
-
-            if not active_g_quiz_data:
-                st.info("No active group quiz currently exists. Create one for your study group below!")
-                with st.form(key=f"create_g_quiz_form_{active_group['group_id']}"):
-                    st.markdown("#### 📝 Create Group Quiz")
-                    g_subj = st.text_input("Group Subject", value=active_group["subject"])
-                    g_topics_dict = active_group.get("learned_topics", {})
-                    topic_options = list(g_topics_dict.keys()) if g_topics_dict else [f"{active_group['subject']} Fundamentals"]
-                    g_target_topic = st.selectbox("Quiz Topic focus", options=topic_options)
-                    g_num_q = st.radio("Number of Questions", options=[5, 10], index=0, horizontal=True)
-                    g_diff = st.selectbox("Difficulty Level", options=["Mixed (Easy, Medium, Hard)", "Easy", "Medium", "Hard"])
-                    
-                    submit_create = st.form_submit_button("🚀 Generate Shared Group Quiz", type="primary")
+    # Top action bar: Create New Space / Join via Token
+    col_act1, col_act2 = st.columns([1, 1])
+    with col_act1:
+        with st.expander("➕ Create New Study Space", expanded=(len(user_spaces) == 0)):
+            with st.form("create_study_space_form"):
+                space_name = st.text_input("Study Space Name", placeholder="e.g. DSA Placement Preparation")
+                space_subj = st.text_input("Academic Subject", value=st.session_state.current_subject)
+                space_desc = st.text_area("Description (Optional)", placeholder="What is this study space for?")
+                submit_create = st.form_submit_button("Create Study Space ✅", type="primary", use_container_width=True)
 
                 if submit_create:
-                    if not g_topics_dict:
-                        learning_tracker.record_learned_topic(
-                            registry=g_topics_dict,
-                            topic_name=g_target_topic,
-                            subtopic_name="General Concepts",
-                            subject=g_subj,
-                            explanation=f"Core principles of {g_subj}"
+                    if not space_name.strip():
+                        st.error("Please enter a study space name.")
+                    else:
+                        new_space_id = f"space_{uuid.uuid4().hex[:12]}"
+                        new_invite_token = secrets.token_urlsafe(16)
+                        space_data = database.create_study_space(
+                            space_id=new_space_id,
+                            owner_user_id=user_id,
+                            owner_username=user_name,
+                            name=space_name.strip(),
+                            subject=space_subj.strip(),
+                            description=space_desc.strip(),
+                            invite_token=new_invite_token
                         )
+                        st.session_state["active_space_id"] = new_space_id
+                        st.session_state["just_created_token"] = new_invite_token
+                        st.success(f"✅ Study Space '{space_name}' created successfully!")
+                        st.rerun()
 
-                    with st.spinner("Generating shared group quiz via Gemini..."):
-                        try:
-                            g_quiz = quiz_engine.generate_personalized_quiz(
-                                registry=g_topics_dict,
-                                documents=active_group.get("group_documents", []),
-                                subject=g_subj,
-                                target_topics=[g_target_topic],
-                                difficulty_preference=g_diff,
-                                num_questions_override=g_num_q
-                            )
-                            group_learning.set_active_group_quiz(
-                                group_id=active_group["group_id"],
-                                quiz_obj=g_quiz,
-                                created_by=st.session_state.user_name
-                            )
-                            st.success("🎉 Shared Group Quiz generated!")
+    with col_act2:
+        with st.expander("🔑 Join via Invite Token / Link"):
+            with st.form("join_study_space_token_form"):
+                input_token = st.text_input("Enter Invite Token or Full Link", placeholder="e.g. 7f4a8c9d...")
+                submit_join_tok = st.form_submit_button("Join Space 🚀", use_container_width=True)
+
+                if submit_join_tok and input_token.strip():
+                    raw = input_token.strip()
+                    tok = raw.split("invite=")[-1].split("join_group=")[-1].split("/")[-1].strip()
+                    sp = database.get_study_space_by_token(tok)
+                    if sp:
+                        database.add_study_space_member(sp["space_id"], user_id, user_name, role="member")
+                        st.session_state["active_space_id"] = sp["space_id"]
+                        st.success(f"🎉 Successfully joined '{sp['name']}'!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid or expired invite token.")
+
+    st.markdown("---")
+
+    if not user_spaces:
+        st.info("💡 You have not joined any Study Spaces yet. Create your first Study Space or join one using an invite link above!")
+        return
+
+    # Select Active Study Space
+    space_options = {s["space_id"]: f"👥 {s['name']} ({s['subject']})" for s in user_spaces}
+    active_space_id = st.session_state.get("active_space_id")
+    if active_space_id not in space_options:
+        active_space_id = user_spaces[0]["space_id"]
+        st.session_state["active_space_id"] = active_space_id
+
+    selected_space_id = st.selectbox(
+        "Select Active Study Space:",
+        options=list(space_options.keys()),
+        format_func=lambda sid: space_options[sid],
+        index=list(space_options.keys()).index(active_space_id),
+        key="space_selector_box"
+    )
+    st.session_state["active_space_id"] = selected_space_id
+
+    space = database.get_study_space_by_id(selected_space_id)
+    if not space:
+        st.error("Study space not found or has been deleted.")
+        return
+
+    # BACKEND SECURITY GATE: Enforce Membership Validation
+    if not database.is_study_space_member(selected_space_id, user_id):
+        st.error("🔒 Security Gate: You are not authorized to view this Study Space.")
+        return
+
+    is_owner = database.is_study_space_owner(selected_space_id, user_id)
+    members = database.get_study_space_members(selected_space_id)
+
+    # Shareable Invite Token link display
+    invite_token = space["invite_token"]
+    invite_url = f"http://localhost:8501/?invite={invite_token}"
+
+    st.markdown(
+        f"""
+        <div style="background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(99, 102, 241, 0.35); border-radius: 16px; padding: 1.4rem; margin-bottom: 1.2rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <h2 style="color: #F8FAFC; margin:0 0 0.3rem 0;">👥 {space['name']}</h2>
+                    <div style="color: #94A3B8; font-size: 0.95rem;">
+                        Subject: <b>{space['subject']}</b> | Members: <b>{len(members)}</b> | Owner: <b>{space['owner_username']}</b> {'👑' if is_owner else ''}
+                    </div>
+                    {f"<div style='color: #CBD5E1; font-size: 0.88rem; margin-top: 0.4rem;'>{space['description']}</div>" if space.get('description') else ''}
+                </div>
+                <div>
+                    <span class="badge-pill badge-strong">● Persistent Storage</span>
+                </div>
+            </div>
+            <div style="margin-top: 1rem; background: rgba(30, 41, 59, 0.7); border-radius: 10px; padding: 0.8rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
+                <div style="font-size: 0.85rem; color: #E2E8F0;">
+                    🔗 <b>Shareable Invite Link:</b> <code>{invite_url}</code>
+                </div>
+                <div>
+                    <button onclick="navigator.clipboard.writeText('{invite_url}'); alert('📋 Invite link copied!');" style="background:#3B82F6; color:#FFF; border:none; padding:6px 14px; border-radius:6px; font-weight:600; cursor:pointer;">
+                        📋 Copy Link
+                    </button>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # TABS FOR STUDY SPACE
+    tab_mats, tab_ai, tab_chat, tab_quiz, tab_mems, tab_act = st.tabs([
+        "📚 Materials",
+        "🤖 AI Tutor",
+        "💬 Discussion",
+        "📝 Quiz",
+        "👥 Members",
+        "📈 Space Activity"
+    ])
+
+    # 1. TAB: SHARED MATERIALS
+    with tab_mats:
+        st.markdown("### 📚 Shared Study Materials")
+        st.caption("Upload course materials into this Study Space. Materials uploaded here are isolated specifically to this Study Space.")
+
+        col_up1, col_up2 = st.columns([1.5, 1])
+        with col_up1:
+            shared_files = st.file_uploader(
+                "Upload PDF/PPT/PPTX to Study Space",
+                type=config.SUPPORTED_FILE_TYPES,
+                accept_multiple_files=True,
+                key=f"space_file_uploader_{selected_space_id}"
+            )
+            if shared_files:
+                for sf in shared_files:
+                    existing_docs = database.get_study_space_documents(selected_space_id, user_id)
+                    already = any(d["filename"] == sf.name for d in existing_docs)
+                    if not already:
+                        with st.spinner(f"📖 Parsing & indexing '{sf.name}' into Study Space..."):
+                            try:
+                                file_bytes = sf.read()
+                                sdoc_data = document_processor.process_study_space_file(
+                                    file_bytes=file_bytes,
+                                    filename=sf.name,
+                                    space_id=selected_space_id,
+                                    subject=space["subject"],
+                                    uploaded_by=user_id,
+                                    uploaded_by_name=user_name
+                                )
+                                st.success(f"✅ Shared: '{sf.name}' ({sdoc_data['total_units']} chunks)")
+                                database.log_study_space_activity(
+                                    f"act_{selected_space_id}_{sf.name}",
+                                    selected_space_id,
+                                    user_id,
+                                    user_name,
+                                    "upload",
+                                    f"{user_name} uploaded shared material '{sf.name}'"
+                                )
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Upload failed: {str(e)}")
+
+        space_docs = database.get_study_space_documents(selected_space_id, user_id)
+        if space_docs:
+            st.markdown("#### 📄 Shared Files List:")
+            for d in space_docs:
+                with st.expander(f"📄 {d['filename']} ({d['file_size_mb']} MB, {d['total_units']} units) — Uploaded by {d['uploaded_by_name']}"):
+                    ov = database.get_material_overview(d["doc_id"])
+                    if ov:
+                        st.markdown(f"**Main Topics:** {', '.join(ov.get('main_topics', []))}")
+                        st.markdown(f"**Key Concepts:** {', '.join(ov.get('key_concepts', []))}")
+                        st.markdown(f"**Exam Focus:** {', '.join(ov.get('exam_points', []))}")
+
+                    if is_owner or str(d["uploaded_by"]) == str(user_id):
+                        if st.button(f"🗑️ Delete {d['filename']}", key=f"del_doc_{d['doc_id']}"):
+                            database.delete_study_space_document(d["doc_id"], selected_space_id, user_id)
+                            st.success("Document deleted.")
                             st.rerun()
-                        except quiz_engine.GroundedQuizError as e:
-                            st.warning(f"⚠️ {str(e)}")
-                        except Exception as e:
-                            st.error(f"Failed to generate group quiz: {str(e)}")
+        else:
+            st.info("No shared study materials uploaded to this space yet.")
+
+    # 2. TAB: AI STUDY ASSISTANT (ISOLATED RAG)
+    with tab_ai:
+        st.markdown("### 🤖 AI Study Assistant (Space Grounded)")
+        st.caption("Ask any academic doubt about the shared materials in this Study Space. EduMind AI will answer grounded ONLY in this space's materials.")
+
+        space_chats_key = f"space_ai_chats_{selected_space_id}"
+        if space_chats_key not in st.session_state:
+            st.session_state[space_chats_key] = [
+                {"role": "assistant", "content": f"Hello! I am your AI Study Assistant for **{space['name']}**. Ask me any doubt about your shared materials!"}
+            ]
+
+        for m in st.session_state[space_chats_key]:
+            avatar = "🎓" if m["role"] == "assistant" else "👤"
+            with st.chat_message(m["role"], avatar=avatar):
+                st.markdown(m["content"])
+
+        ai_input = st.chat_input("Ask AI doubt regarding shared space materials...", key=f"space_ai_input_{selected_space_id}")
+        if ai_input and ai_input.strip():
+            cleaned_q = ai_input.strip()
+            st.session_state[space_chats_key].append({"role": "user", "content": cleaned_q})
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(cleaned_q)
+
+            with st.chat_message("assistant", avatar="🎓"):
+                with st.spinner("Searching shared materials & thinking..."):
+                    space_user_id = f"space_{selected_space_id}"
+                    matching_chunks = document_processor.search_documents(
+                        documents=None,
+                        query=cleaned_q,
+                        subject=space["subject"],
+                        top_k=config.TOP_K,
+                        user_id=space_user_id
+                    )
+
+                    doc_context = document_processor.format_context_for_prompt(matching_chunks) if matching_chunks else ""
+                    
+                    if not doc_context:
+                        resp_text = "I couldn't find relevant information in the shared materials of this Study Space."
+                        st.markdown(resp_text)
+                    else:
+                        stream = gemini_client.generate_chat_response_stream(
+                            messages=st.session_state[space_chats_key],
+                            document_context=doc_context,
+                            subject=space["subject"]
+                        )
+                        resp_text = st.write_stream(stream)
+                        if matching_chunks:
+                            cite_str = "\n\n📚 **Source:** " + ", ".join(
+                                f"`{c.get('filename', 'Doc')} — {c.get('unit_label', 'Page 1')}`" for c in matching_chunks
+                            )
+                            st.markdown(cite_str)
+                            resp_text += cite_str
+
+                    st.session_state[space_chats_key].append({"role": "assistant", "content": resp_text})
+                    
+                    database.log_study_space_activity(
+                        f"act_ai_{selected_space_id}_{int(time.time())}",
+                        selected_space_id,
+                        user_id,
+                        user_name,
+                        "doubt",
+                        f"{user_name} asked AI doubt: '{cleaned_q[:50]}...'"
+                    )
+
+    # 3. TAB: PERSISTENT GROUP CHAT WITH THOUGHT TAGS & REACTIONS & POLLING
+    with tab_chat:
+        st.markdown("### 💬 Persistent Group Discussion & Thought Box")
+
+        col_ref1, col_ref2 = st.columns([4, 1])
+        with col_ref2:
+            if st.button("🔄 Refresh Messages", key=f"btn_ref_msg_{selected_space_id}"):
+                st.rerun()
+
+        # Load persistent messages from SQLite DB
+        messages_list = database.get_study_space_messages(selected_space_id, user_id, limit=100)
+
+        # Container for chat messages stream
+        chat_box_container = st.container()
+
+        with chat_box_container:
+            if not messages_list:
+                st.caption("No discussion messages yet. Start the conversation below!")
             else:
-                g_quiz_id = active_g_quiz_data["group_quiz_id"]
-                shared_quiz: quiz_engine.Quiz = active_g_quiz_data["quiz"]
-                creator = active_g_quiz_data.get("created_by", "Group Admin")
+                for m in messages_list:
+                    m_type = m.get("message_type", "chat")
+                    tag_prefix = ""
+                    card_style = "background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(148, 163, 184, 0.2);"
+                    if m_type == "thought":
+                        tag_prefix = "💡 <b>Thought:</b> "
+                        card_style = "background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.4);"
+                    elif m_type == "question":
+                        tag_prefix = "❓ <b>Question:</b> "
+                        card_style = "background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.4);"
+                    elif m_type == "helpful":
+                        tag_prefix = "✅ <b>Helpful Tip:</b> "
+                        card_style = "background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.4);"
+                    elif m_type == "important":
+                        tag_prefix = "📌 <b>Important:</b> "
+                        card_style = "background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.4);"
 
-                st.markdown(f"#### 🧠 {shared_quiz.title}")
-                st.caption(f"Shared Quiz ID: `{g_quiz_id}` | Created by: `{creator}` | Total Questions: {shared_quiz.total_questions}")
-
-                member_attempt = group_learning.get_member_quiz_attempt(active_group["group_id"], st.session_state.user_name)
-                is_submitted = member_attempt.get("submitted", False)
-
-                if st.button("🔄 Create New Shared Group Quiz", key=f"btn_reset_gquiz_{g_quiz_id}"):
-                    active_group["active_group_quiz"] = None
-                    active_group["member_quiz_attempts"] = {}
-                    st.rerun()
-
-                st.markdown("---")
-
-                if not is_submitted:
-                    total_q = shared_quiz.total_questions
-                    curr_idx = member_attempt.get("current_index", 0)
-                    if curr_idx >= total_q:
-                        curr_idx = total_q - 1
-
-                    q = shared_quiz.questions[curr_idx]
-                    st.progress((curr_idx + 1) / total_q, text=f"Question {curr_idx + 1} of {total_q}")
+                    reactions = m.get("reactions", {})
+                    react_html_parts = []
+                    for emo, uids in reactions.items():
+                        react_html_parts.append(f"<span style='background:rgba(99,102,241,0.2); padding:2px 6px; border-radius:6px; font-size:0.8rem; margin-right:4px;'>{emo} {len(uids)}</span>")
+                    react_html = "".join(react_html_parts)
 
                     st.markdown(
                         f"""
-                        <div class="quiz-card">
-                            <span class="topic-badge badge-learned">Subject: {q.subject}</span>
-                            <span class="topic-badge badge-learned">Topic: {q.topic} ({q.subtopic})</span>
-                            <span class="topic-badge badge-practice">Difficulty: {q.difficulty}</span>
-                            <span class="badge-pill badge-reward">Reward: 🪙 {q.coin_reward} Coins</span>
-                            <div class="quiz-question-heading">{q.question}</div>
+                        <div style="{card_style} border-radius: 12px; padding: 0.9rem 1.1rem; margin-bottom: 0.75rem;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.3rem;">
+                                <div style="font-weight:700; color:#F8FAFC; font-size:0.92rem;">👤 {m['sender_name']}</div>
+                                <div style="font-size:0.75rem; color:#94A3B8;">{m['created_at']}</div>
+                            </div>
+                            <div style="color:#E2E8F0; font-size:0.95rem; line-height:1.4;">
+                                {tag_prefix}{m['message_text']}
+                            </div>
+                            {f"<div style='margin-top:0.4rem;'>{react_html}</div>" if react_html else ''}
                         </div>
                         """,
                         unsafe_allow_html=True
                     )
 
-                    voice_engine.render_voice_button(
-                        f"Question {curr_idx + 1}. {q.question}",
-                        button_id=f"g_quiz_q_{q.id}",
-                        voice_gender=st.session_state.selected_voice_gender
-                    )
+                    # Reaction Buttons
+                    r_col1, r_col2, r_col3, r_col_space = st.columns([1, 1, 1, 7])
+                    with r_col1:
+                        if st.button("👍", key=f"react_like_{m['message_id']}"):
+                            database.toggle_message_reaction(m['message_id'], selected_space_id, user_id, "👍")
+                            st.rerun()
+                    with r_col2:
+                        if st.button("❤️", key=f"react_heart_{m['message_id']}"):
+                            database.toggle_message_reaction(m['message_id'], selected_space_id, user_id, "❤️")
+                            st.rerun()
+                    with r_col3:
+                        if st.button("💡", key=f"react_idea_{m['message_id']}"):
+                            database.toggle_message_reaction(m['message_id'], selected_space_id, user_id, "💡")
+                            st.rerun()
 
-                    user_hints = member_attempt.get("hints_used", {})
-                    has_used_hint = user_hints.get(q.id, False)
+        st.markdown("---")
+        with st.form(f"send_message_form_{selected_space_id}"):
+            col_in1, col_in2 = st.columns([4, 1])
+            with col_in1:
+                new_msg = st.text_input("Type message...", placeholder="Share thoughts, ask questions...", label_visibility="collapsed")
+            with col_in2:
+                msg_category = st.selectbox("Type", options=["💬 Chat", "💡 Thought", "❓ Question", "✅ Helpful", "📌 Important"], label_visibility="collapsed")
 
-                    h_col1, h_col2 = st.columns([1, 3])
-                    with h_col1:
-                        if has_used_hint:
-                            st.info("💡 Hint Used")
-                        else:
-                            if st.button(f"💡 Hint — 🪙 {config.HINT_COST}", key=f"btn_g_hint_{q.id}"):
-                                if not CoinManager.can_afford(config.HINT_COST):
-                                    st.warning(f"💰 Not enough coins! You need {config.HINT_COST} coins to use a hint.")
-                                else:
-                                    if CoinManager.spend_coins(config.HINT_COST, "Group Quiz hint", "quiz", reference_id=f"g_hint_{q.id}"):
-                                        user_hints[q.id] = True
-                                        member_attempt["hints_used"] = user_hints
-                                        st.rerun()
+            submit_msg = st.form_submit_button("Send 📤", type="primary", use_container_width=True)
+            if submit_msg and new_msg.strip():
+                cat_type = "chat"
+                if "Thought" in msg_category:
+                    cat_type = "thought"
+                elif "Question" in msg_category:
+                    cat_type = "question"
+                elif "Helpful" in msg_category:
+                    cat_type = "helpful"
+                elif "Important" in msg_category:
+                    cat_type = "important"
 
-                    if has_used_hint:
-                        st.markdown(
-                            f"""
-                            <div class="hint-card">
-                                <div><b>💡 Hint:</b> {q.hint}</div>
-                                <div style="font-size:0.8rem; margin-top:0.3rem; opacity:0.8;">🪙 {config.HINT_COST} coins used</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                    st.markdown("---")
-                    user_ans_dict = member_attempt.get("answers", {})
-                    existing_ans = user_ans_dict.get(q.id)
-
-                    selected_opt = st.radio(
-                        "Select your answer:",
-                        options=q.options,
-                        index=existing_ans if existing_ans is not None else 0,
-                        key=f"g_q_radio_{q.id}_{g_quiz_id}"
-                    )
-                    user_ans_dict[q.id] = q.options.index(selected_opt)
-                    member_attempt["answers"] = user_ans_dict
-
-                    nav_c1, nav_c2, nav_c3 = st.columns([1, 2, 1])
-
-                    with nav_c1:
-                        if curr_idx > 0:
-                            if st.button("← Previous", key="btn_g_prev"):
-                                member_attempt["current_index"] = curr_idx - 1
-                                st.rerun()
-
-                    with nav_c3:
-                        if curr_idx < total_q - 1:
-                            if st.button("Next Question →", key="btn_g_next"):
-                                member_attempt["current_index"] = curr_idx + 1
-                                st.rerun()
-                        else:
-                            if st.button("Submit Group Quiz ✅", type="primary", key="btn_g_submit"):
-                                report = quiz_engine.evaluate_quiz(
-                                    quiz=shared_quiz,
-                                    student_answers=member_attempt["answers"],
-                                    registry=active_group.get("learned_topics", {}),
-                                    hints_used=member_attempt.get("hints_used", {}),
-                                    user_id=st.session_state.user_id
-                                )
-                                score = report.get("score", 0)
-                                coins_earned = report.get("coins_earned", 0)
-
-                                member_attempt["submitted"] = True
-                                member_attempt["score"] = score
-                                member_attempt["coins_earned"] = coins_earned
-                                member_attempt["report"] = report
-                                member_attempt["submitted_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-
-                                group_learning.record_group_quiz_result(
-                                    group_id=active_group["group_id"],
-                                    username=st.session_state.user_name,
-                                    score=score,
-                                    total_questions=total_q,
-                                    coins_earned=coins_earned
-                                )
-                                st.balloons()
-                                st.rerun()
-                else:
-                    report = member_attempt.get("report", {})
-                    score = member_attempt.get("score", 0)
-                    total_q = shared_quiz.total_questions
-                    coins_earned = member_attempt.get("coins_earned", 0)
-                    pct = report.get("percentage", round((score / total_q) * 100, 1) if total_q > 0 else 0)
-
-                    st.success("✅ Group Quiz Completed!")
-                    r_c1, r_c2, r_c3, r_c4 = st.columns(4)
-                    r_c1.metric("Your Score", f"{score} / {total_q}")
-                    r_c2.metric("Score %", f"{pct}%")
-                    r_c3.metric("Coins Earned", f"🪙 +{coins_earned}")
-                    r_c4.metric("Total Balance", f"💰 {st.session_state.coin_balance}")
-
-                    st.markdown("---")
-                    st.subheader("📖 Detailed Question Review")
-                    for fb in report.get("question_feedback", []):
-                        status_icon = "✅" if fb["is_correct"] else "❌"
-                        st.markdown(f"**Question {fb['question_id']}: {status_icon} {fb['question']}**")
-                        if fb["is_correct"]:
-                            st.success(f"Your Answer: **{fb['selected_text']}** (Correct!) — Earned 🪙 +{fb['coin_reward']}")
-                        else:
-                            st.error(f"Your Answer: **{fb['selected_text']}**\n\nCorrect Answer: **{fb['correct_text']}**")
-                            st.info(f"💡 Explanation: {fb['explanation']}")
-                        st.markdown("---")
-
-        with tab_lead:
-            st.markdown("### 🏆 Group Leaderboard")
-            leaderboard = group_learning.get_sorted_group_leaderboard(active_group["group_id"])
-            for m in leaderboard:
-                rank = m.get("rank", 1)
-                rank_icon = "🥇" if rank == 1 else ("🥈" if rank == 2 else ("🥉" if rank == 3 else f"#{rank}"))
-                username = m.get("username", "Member")
-                is_you = " (You)" if username == st.session_state.user_name else ""
-
-                st.markdown(
-                    f"""
-                    <div class="leaderboard-card">
-                        <div>
-                            <span style="font-size: 1.2rem; font-weight:700; margin-right:0.6rem;">{rank_icon}</span>
-                            <b style="font-size: 1.05rem;">{username}{is_you}</b>
-                        </div>
-                        <div>
-                            <span class="badge-pill badge-streak">⭐ {m.get('points', 0)} Points</span>
-                            <span class="badge-pill badge-coins">🪙 {m.get('coins_earned', 0)} Coins</span>
-                            <span class="topic-badge badge-learned">Quizzes: {m.get('quizzes_taken', 0)}</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
+                msg_id = f"msg_{selected_space_id}_{uuid.uuid4().hex[:10]}"
+                database.save_study_space_message(
+                    message_id=msg_id,
+                    space_id=selected_space_id,
+                    user_id=user_id,
+                    sender_name=user_name,
+                    message_text=new_msg.strip(),
+                    message_type=cat_type
                 )
+                database.log_study_space_activity(
+                    f"act_msg_{msg_id}",
+                    selected_space_id,
+                    user_id,
+                    user_name,
+                    "chat",
+                    f"{user_name} posted a {cat_type}"
+                )
+                st.rerun()
 
-        with tab_analytics:
-            st.markdown("### 📊 Group Progress & Analytics")
-            g_docs_cnt = len(active_group.get("group_documents", []))
-            g_topics_cnt = len(active_group.get("learned_topics", {}))
-            g_members_cnt = len(active_group.get("members", {}))
+    # 4. TAB: SHARED GROUP QUIZ
+    with tab_quiz:
+        st.markdown("### 📝 Shared Group Quiz")
+        st.caption("Generate a shared quiz derived strictly from shared Study Space materials. Each member takes an independent attempt.")
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Group Members", f"👥 {g_members_cnt}")
-            c2.metric("Shared Materials", f"📚 {g_docs_cnt}")
-            c3.metric("Group Topics", f"🧠 {g_topics_cnt}")
+        if st.button("✨ Generate New Group Quiz", type="primary", key=f"btn_gen_group_quiz_{selected_space_id}"):
+            with st.spinner("Generating shared group quiz from space materials..."):
+                try:
+                    g_quiz = quiz_engine.generate_study_space_quiz(selected_space_id, subject=space["subject"], num_questions=5, difficulty="Mixed", user_id=user_id)
+                    database.save_study_space_quiz(
+                        quiz_id=g_quiz.quiz_id,
+                        space_id=selected_space_id,
+                        created_by=user_name,
+                        title=g_quiz.title,
+                        questions=[q.to_dict() for q in g_quiz.questions]
+                    )
+                    st.success(f"✅ Generated Group Quiz: '{g_quiz.title}'!")
+                    st.rerun()
+                except quiz_engine.GroundedQuizError as e:
+                    st.warning(f"⚠️ {str(e)}")
+                except Exception as e:
+                    st.error(f"Failed to generate group quiz: {str(e)}")
 
-    except Exception as e:
-        st.error("⚠️ AI Service temporarily busy or error occurred. Please try again.")
-        st.caption(f"Technical note: {str(e)}")
+        space_quizzes = database.get_study_space_quizzes(selected_space_id, user_id)
+        if space_quizzes:
+            st.markdown("#### 📝 Available Group Quizzes:")
+            for gq in space_quizzes:
+                st.markdown(f"**{gq['title']}** (Created by {gq['created_by']} on {gq['created_at']})")
+                if st.button(f"▶️ Take Quiz ({gq['quiz_id'][:8]})", key=f"take_gq_{gq['quiz_id']}"):
+                    questions_objs = []
+                    for idx, qd in enumerate(gq["questions"], 1):
+                        questions_objs.append(
+                            quiz_engine.QuizQuestion(
+                                q_id=idx,
+                                subject=space["subject"],
+                                topic=qd.get("topic", space["subject"]),
+                                subtopic=qd.get("subtopic", ""),
+                                difficulty=qd.get("difficulty", "Medium"),
+                                coin_reward=qd.get("coin_reward", 10),
+                                question=qd["question"],
+                                options=qd["options"],
+                                correct_index=qd["correct_index"],
+                                explanation=qd.get("explanation", ""),
+                                source_citation=qd.get("source_citation", "")
+                            )
+                        )
+                    active_g_quiz = quiz_engine.Quiz(
+                        subject=space["subject"],
+                        title=gq["title"],
+                        topics_covered=[space["subject"]],
+                        questions=questions_objs
+                    )
+                    active_g_quiz.quiz_id = gq["quiz_id"]
+                    st.session_state.current_quiz = active_g_quiz
+                    st.session_state.quiz_mode = True
+                    st.session_state.quiz_answers = {}
+                    st.session_state.quiz_hints_used = {}
+                    st.session_state.quiz_submitted = False
+                    st.session_state.quiz_index = 0
+                    st.rerun()
+                st.markdown("---")
+        else:
+            st.info("No group quizzes created in this Study Space yet.")
+
+    # 5. TAB: MEMBERS MANAGEMENT
+    with tab_mems:
+        st.markdown("### 👥 Study Space Members")
+        for m in members:
+            r_tag = "👑 Owner" if m["role"] == "owner" else "👤 Member"
+            st.markdown(f"- **{m['username']}** ({r_tag}) — Joined {m['joined_at']}")
+            if is_owner and m["role"] != "owner":
+                if st.button(f"❌ Remove {m['username']}", key=f"btn_rem_mem_{m['user_id']}"):
+                    database.remove_study_space_member(selected_space_id, user_id, m["user_id"])
+                    st.success(f"Removed {m['username']}")
+                    st.rerun()
+
+        if is_owner:
+            st.markdown("---")
+            st.markdown("#### ⚙️ Owner Settings")
+            col_ow1, col_ow2 = st.columns(2)
+            with col_ow1:
+                if st.button("🔄 Regenerate Invite Link", key=f"btn_regen_tok_{selected_space_id}"):
+                    new_tok = secrets.token_urlsafe(16)
+                    database.regenerate_invite_token(selected_space_id, user_id, new_tok)
+                    st.success("Regenerated invite token!")
+                    st.rerun()
+            with col_ow2:
+                if st.button("🗑️ Delete Study Space", type="primary", key=f"btn_del_space_{selected_space_id}"):
+                    database.delete_study_space(selected_space_id, user_id)
+                    st.success("Study Space deleted.")
+                    st.rerun()
+
+    # 6. TAB: SPACE ACTIVITY & AGGREGATE ANALYTICS
+    with tab_act:
+        st.markdown("### 📈 Space Aggregate Analytics")
+        agg = database.get_study_space_aggregate_analytics(selected_space_id, user_id)
+
+        a_col1, a_col2, a_col3, a_col4, a_col5 = st.columns(5)
+        a_col1.metric("Members", agg.get("member_count", 0))
+        a_col2.metric("Shared Materials", agg.get("shared_documents_count", 0))
+        a_col3.metric("Shared Quizzes", agg.get("shared_quizzes_count", 0))
+        a_col4.metric("Messages", agg.get("messages_count", 0))
+        a_col5.metric("Avg Quiz Score", f"{agg.get('average_group_quiz_score', 0)}%")
+
+        st.markdown("---")
+        st.markdown("### 📋 Recent Space Activity Feed")
+        activities = database.get_study_space_activity(selected_space_id, user_id, limit=30)
+        if activities:
+            for act in activities:
+                st.markdown(f"• **{act['username']}** {act['description']} <span style='font-size:0.75rem; color:#94A3B8;'>({act['created_at']})</span>", unsafe_allow_html=True)
+        else:
+            st.caption("No recorded activities yet.")
+
+
+def render_friends_dashboard():
+    render_study_spaces_page()
+
 
 current_page = st.session_state.get("current_page", nav_mode)
 
@@ -1970,8 +2148,8 @@ elif "My Analytics" in current_page:
     render_student_analytics_page()
 elif "Dashboard" in current_page:
     render_dashboard_page()
-elif "Friends" in current_page:
-    render_friends_dashboard()
+elif "Study Spaces" in current_page or "Friends" in current_page:
+    render_study_spaces_page()
 elif "Aptitude" in current_page:
     render_aptitude_section()
 elif "Games" in current_page:
@@ -2124,9 +2302,13 @@ Supported: JPG • PNG • WEBP (Max 15 MB)
             ai_context_html = f"""<div class="ai-context-pill">
 <span style="font-weight:700; color:#F8FAFC;">🧠 AI CONTEXT:</span>
 <span class="context-badge">{context_status_text}</span>
-<span class="context-badge">🎓 {st.session_state.current_subject}</span>
 </div>"""
             st.markdown(ai_context_html, unsafe_allow_html=True)
+
+            if st.session_state.documents:
+                latest_doc = st.session_state.documents[-1]
+                with st.expander(f"📖 Automatic Material Overview & Grounded Quiz: {latest_doc['filename']}", expanded=True):
+                    render_material_overview_card(latest_doc)
 
             if len(st.session_state.messages) <= 1:
                 hero_3d_html = f"""<div class="hero-ai-container" id="heroNeuralContainer">

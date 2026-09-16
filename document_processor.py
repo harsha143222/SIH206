@@ -243,6 +243,10 @@ def process_uploaded_file(
         v_store = get_subject_vector_store(subj_norm, user_id=user_id)
         v_store.add_chunks(chunks, embeddings)
 
+    # Generate automatic AI overview of uploaded material
+    overview = generate_material_overview(chunks, filename, subj_norm, len(chunks))
+    database.save_material_overview(doc_id, filename, subj_norm, overview)
+
     doc_data = {
         "user_id": str(user_id),
         "doc_id": doc_id,
@@ -252,7 +256,8 @@ def process_uploaded_file(
         "file_size_mb": file_size_mb,
         "file_type": file_ext.upper(),
         "total_units": len(chunks),
-        "chunks": chunks
+        "chunks": chunks,
+        "overview": overview
     }
 
     # Save processed JSON and database record
@@ -269,6 +274,144 @@ def process_uploaded_file(
         filename, user_id, subj_norm, file_size_mb, len(chunks)
     )
     return doc_data
+
+
+def generate_material_overview(chunks: List[Dict[str, Any]], filename: str, subject: str, total_units: int = 1) -> Dict[str, Any]:
+    """
+    Automatically generate a structured academic overview of uploaded material using Gemini AI.
+    Contains: Document title, Subject, Number of pages/slides, Main topics, Key concepts, Recommended order, Exam focus.
+    Grounded STRICTLY in the uploaded material.
+    """
+    if not chunks:
+        return {
+            "document_title": filename,
+            "subject": subject,
+            "total_units": total_units,
+            "main_topics": ["General Overview"],
+            "key_concepts": ["Course Notes"],
+            "recommended_order": ["Read through the document"],
+            "exam_points": ["Review key terms"]
+        }
+
+    context_text = "\n".join([f"[{c.get('unit_label', 'Page')}] {c.get('text', '')}" for c in chunks[:15]])
+    if len(context_text) > 8000:
+        context_text = context_text[:8000]
+
+    prompt = f"""
+Analyze the following uploaded study material for the subject '{subject}'.
+DOCUMENT FILENAME: {filename}
+EXTRACTED CONTENT:
+{context_text}
+
+Generate a comprehensive academic overview grounded STRICTLY in this material. Do NOT invent topics not present in the content.
+
+OUTPUT JSON FORMAT:
+{{
+  "main_topics": ["Topic 1", "Topic 2", "Topic 3", "Topic 4"],
+  "key_concepts": ["Concept 1", "Concept 2", "Concept 3"],
+  "recommended_order": ["1. Topic 1", "2. Topic 2", "3. Topic 3"],
+  "exam_points": ["Exam Focus Point 1", "Exam Focus Point 2"]
+}}
+"""
+    try:
+        data = gemini_client.generate_json_response(prompt)
+        main_topics = data.get("main_topics") or ["Overview of " + filename]
+        key_concepts = data.get("key_concepts") or ["Core Concepts"]
+        recommended_order = data.get("recommended_order") or [f"{i+1}. {t}" for i, t in enumerate(main_topics)]
+        exam_points = data.get("exam_points") or ["Key definitions and formulas"]
+    except Exception as e:
+        logger.warning("Failed to generate Gemini overview: %s. Using heuristic fallback.", str(e))
+        main_topics = list(dict.fromkeys([c.get("section_title", f"Unit {idx+1}") for idx, c in enumerate(chunks[:5])]))
+        if not main_topics:
+            main_topics = ["Overview of " + filename]
+        key_concepts = ["Core Concepts in " + filename]
+        recommended_order = [f"{i+1}. {t}" for i, t in enumerate(main_topics)]
+        exam_points = ["Review key sections covered in document"]
+
+    return {
+        "document_title": filename,
+        "subject": subject,
+        "total_units": total_units,
+        "main_topics": main_topics,
+        "key_concepts": key_concepts,
+        "recommended_order": recommended_order,
+        "exam_points": exam_points
+    }
+
+
+def process_study_space_file(
+    file_bytes: bytes,
+    filename: str,
+    space_id: str,
+    subject: str,
+    uploaded_by: str,
+    uploaded_by_name: str
+) -> Dict[str, Any]:
+    """
+    Process study space file and store in isolated vector index for this space (`user_id=space_{space_id}`).
+    """
+    file_size_bytes = len(file_bytes)
+    file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+    file_ext = Path(filename).suffix.lower().lstrip(".")
+
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    doc_id = f"sdoc_{space_id[:8]}_{file_hash[:8]}"
+    subj_norm = subject.strip().title()
+
+    space_dir = config.DATA_DIR / "uploads" / "study_spaces" / space_id
+    space_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = space_dir / f"{doc_id}_{filename}"
+    with open(saved_path, "wb") as f:
+        f.write(file_bytes)
+
+    chunks: List[Dict[str, Any]] = []
+    if file_ext == "pdf":
+        chunks = _extract_pdf_chunks(file_bytes, filename, subj_norm, doc_id)
+    elif file_ext in ["ppt", "pptx"]:
+        chunks = _extract_pptx_chunks(file_bytes, filename, subj_norm, doc_id)
+
+    chunk_texts = [c["text"] for c in chunks]
+    embeddings = gemini_client.generate_embeddings(chunk_texts) if chunk_texts else []
+
+    # Vector store ISOLATED specifically for this Study Space using user_id=f"space_{space_id}"
+    space_user_id = f"space_{space_id}"
+    if chunks and embeddings:
+        v_store = get_subject_vector_store(subj_norm, user_id=space_user_id)
+        v_store.add_chunks(chunks, embeddings)
+
+    doc_data = {
+        "doc_id": doc_id,
+        "space_id": space_id,
+        "uploaded_by": uploaded_by,
+        "uploaded_by_name": uploaded_by_name,
+        "filename": filename,
+        "file_hash": file_hash,
+        "subject": subj_norm,
+        "file_size_mb": file_size_mb,
+        "file_type": file_ext.upper(),
+        "total_units": len(chunks),
+        "chunks": chunks
+    }
+
+    # Generate automatic overview for Study Space document
+    overview = generate_material_overview(chunks, filename, subj_norm, len(chunks))
+    doc_data["overview"] = overview
+    database.save_material_overview(doc_id, filename, subj_norm, overview)
+
+    database.save_study_space_document(
+        doc_id=doc_id,
+        space_id=space_id,
+        uploaded_by=uploaded_by,
+        uploaded_by_name=uploaded_by_name,
+        filename=filename,
+        file_type=file_ext.upper(),
+        file_size_mb=file_size_mb,
+        total_units=len(chunks),
+        storage_path=str(saved_path)
+    )
+
+    return doc_data
+
 
 
 def _extract_pdf_chunks(file_bytes: bytes, filename: str, subject: str, doc_id: str) -> List[Dict[str, Any]]:

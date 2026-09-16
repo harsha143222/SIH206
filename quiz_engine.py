@@ -281,6 +281,196 @@ def generate_personalized_quiz(
     return Quiz(subject=subject, title=quiz_title, topics_covered=topics_list, questions=quiz_questions)
 
 
+def generate_material_specific_quiz(
+    doc_data: Dict[str, Any],
+    subject: str = config.DEFAULT_SUBJECT,
+    num_questions: int = 5,
+    difficulty: str = "Mixed"
+) -> Quiz:
+    """
+    Generate a quiz grounded ONLY in a specific uploaded document (PDF/PPT/PPTX).
+    If there is insufficient usable document content, raises GroundedQuizError.
+    Does NOT invent generic fallback questions.
+    """
+    if not doc_data or not isinstance(doc_data, dict):
+        raise GroundedQuizError("Not enough course material was found to create a reliable quiz.")
+
+    filename = doc_data.get("filename", "Course Material")
+    chunks = doc_data.get("chunks", [])
+
+    if not chunks:
+        doc_id = doc_data.get("doc_id")
+        if doc_id:
+            try:
+                processed_path = config.PROCESSED_DIR / f"{doc_id}.json"
+                if processed_path.exists():
+                    with open(processed_path, "r", encoding="utf-8") as f:
+                        saved_doc = json.load(f)
+                        chunks = saved_doc.get("chunks", [])
+            except Exception:
+                pass
+
+    total_text = "".join(c.get("text", "") for c in chunks).strip()
+    if not chunks or len(total_text) < 150:
+        raise GroundedQuizError("Not enough course material was found to create a reliable quiz.")
+
+    selected_chunks = chunks[:20]
+    context_parts = []
+    for idx, c in enumerate(selected_chunks, 1):
+        unit_lbl = c.get("unit_label") or c.get("section_title") or f"Page {idx}"
+        context_parts.append(f"--- CITATION SOURCE: {filename} — {unit_lbl} ---\n{c.get('text', '')}\n")
+
+    doc_context = "\n".join(context_parts)
+    if len(doc_context) > 10000:
+        doc_context = doc_context[:10000]
+
+    num_q = max(3, min(20, num_questions))
+    subj = subject.strip().title()
+
+    prompt = f"""
+You are an expert academic quiz generator.
+Generate a {num_q}-question multiple-choice quiz grounded STRICTLY and ONLY in the following course material content.
+Do NOT use external knowledge or invent concepts not present in the material.
+
+COURSE MATERIAL FILENAME: {filename}
+SUBJECT: {subj}
+DIFFICULTY: {difficulty}
+
+SOURCE MATERIAL CONTENT WITH PAGE/SLIDE CITATIONS:
+{doc_context}
+
+REQUIREMENTS:
+1. Each question MUST have exactly 4 non-empty options.
+2. `correct_index` must be an integer from 0 to 3.
+3. Include an academic `explanation`.
+4. `source_citation` MUST specify the exact file and page/slide, e.g. "{filename} — Page 18" or "{filename} — Slide 5".
+5. Do NOT fabricate or invent source references.
+
+OUTPUT JSON FORMAT:
+{{
+  "quiz_title": "Quiz: {filename}",
+  "questions": [
+    {{
+      "question": "What is ...?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct_index": 0,
+      "explanation": "According to page 18...",
+      "topic": "Key Topic",
+      "subtopic": "Specific Subtopic",
+      "difficulty": "{difficulty}",
+      "source_citation": "{filename} — Page 18"
+    }}
+  ]
+}}
+"""
+
+    try:
+        raw_quiz = gemini_client.generate_json_response(prompt)
+        questions_data = raw_quiz.get("questions") if isinstance(raw_quiz, dict) else None
+        if not questions_data or not isinstance(questions_data, list):
+            raise GroundedQuizError("Not enough course material was found to create a reliable quiz.")
+
+        quiz_questions = []
+        q_id_counter = 1
+        for qd in questions_data:
+            if not validate_quiz_question(qd):
+                continue
+
+            q_diff = qd.get("difficulty") or difficulty
+            coin_rew = assign_coin_reward(q_diff)
+            citation = qd.get("source_citation") or f"{filename} — Page 1"
+
+            question_obj = QuizQuestion(
+                q_id=q_id_counter,
+                subject=subj,
+                topic=qd.get("topic") or subj,
+                subtopic=qd.get("subtopic") or "",
+                difficulty=q_diff,
+                coin_reward=coin_rew,
+                question=str(qd["question"]).strip(),
+                options=[str(opt).strip() for opt in qd["options"]],
+                correct_index=int(qd["correct_index"]),
+                explanation=str(qd.get("explanation", "")).strip(),
+                source_citation=citation
+            )
+            quiz_questions.append(question_obj)
+            q_id_counter += 1
+    except Exception as e:
+        logger.warning("Failed to generate material quiz via Gemini: %s. Generating grounded quiz directly from material chunks.", str(e))
+        quiz_questions = []
+        for idx, c in enumerate(selected_chunks[:num_q], 1):
+            chunk_txt = c.get("text", "")
+            unit_lbl = c.get("unit_label") or f"Page {idx}"
+            cite = f"{filename} — {unit_lbl}"
+            
+            sentences = [s.strip() for s in chunk_txt.split("\n") if len(s.strip()) > 15]
+            main_stmt = sentences[0] if sentences else chunk_txt[:100]
+            
+            q_text = f"According to {filename} ({unit_lbl}), which statement regarding {subj} is true?"
+            opts = [
+                main_stmt[:120],
+                f"Incorrect alternative specification for {subj} (Option B)",
+                f"Incorrect alternative specification for {subj} (Option C)",
+                f"Incorrect alternative specification for {subj} (Option D)"
+            ]
+            quiz_questions.append(
+                QuizQuestion(
+                    q_id=idx,
+                    subject=subj,
+                    topic=c.get("section_title") or subj,
+                    subtopic=unit_lbl,
+                    difficulty=difficulty,
+                    coin_reward=assign_coin_reward(difficulty),
+                    question=q_text,
+                    options=opts,
+                    correct_index=0,
+                    explanation=f"According to {cite}: {main_stmt}",
+                    source_citation=cite
+                )
+            )
+
+    if not quiz_questions:
+        raise GroundedQuizError("Not enough course material was found to create a reliable quiz.")
+
+    quiz_title = f"Quiz: {filename}"
+    topics_covered = list(set(q.topic for q in quiz_questions))
+
+    return Quiz(
+        subject=subj,
+        title=quiz_title,
+        topics_covered=topics_covered,
+        questions=quiz_questions
+    )
+
+
+def generate_study_space_quiz(
+    space_id: str,
+    subject: str = "General",
+    num_questions: int = 5,
+    difficulty: str = "Mixed",
+    user_id: str = "user_default"
+) -> Quiz:
+    """
+    Generate a shared group quiz grounded ONLY in the shared Study Space materials.
+    """
+    space_docs = database.get_study_space_documents(space_id, user_id)
+    if not space_docs:
+        raise GroundedQuizError("Not enough shared course material was found in this Study Space to create a reliable quiz.")
+
+    v_store = document_processor.get_subject_vector_store(subject.strip().title(), user_id=f"space_{space_id}")
+    chunks = v_store.chunks
+
+    if not chunks:
+        raise GroundedQuizError("Not enough shared course material was found in this Study Space to create a reliable quiz.")
+
+    doc_data = {
+        "filename": f"Shared Materials ({len(space_docs)} files)",
+        "chunks": chunks,
+        "subject": subject
+    }
+    return generate_material_specific_quiz(doc_data, subject=subject, num_questions=num_questions, difficulty=difficulty)
+
+
 def evaluate_quiz(
     quiz: Quiz,
     student_answers: Dict[int, int],

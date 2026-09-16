@@ -261,8 +261,120 @@ def init_db() -> None:
             )
         """)
 
+        # Material Automatic Overview Persistence
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS material_overviews (
+                doc_id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                overview_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Shared Study Spaces persistence
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_spaces (
+                space_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                owner_username TEXT NOT NULL,
+                name TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                description TEXT,
+                invite_token TEXT UNIQUE NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_members (
+                space_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (space_id, user_id),
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_documents (
+                doc_id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                uploaded_by_name TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_size_mb REAL NOT NULL,
+                total_units INTEGER NOT NULL,
+                storage_path TEXT,
+                added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_messages (
+                message_id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                sender_name TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                message_type TEXT DEFAULT 'chat',
+                reactions_json TEXT DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_activity (
+                activity_id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_quizzes (
+                quiz_id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                title TEXT NOT NULL,
+                questions_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_space_quiz_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                quiz_id TEXT NOT NULL,
+                space_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                total_questions INTEGER NOT NULL,
+                percentage REAL NOT NULL,
+                correct_answers INTEGER NOT NULL,
+                wrong_answers INTEGER NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (space_id) REFERENCES study_spaces (space_id) ON DELETE CASCADE
+            )
+        """)
+
         conn.commit()
     logger.info("Database initialized successfully at %s", config.DB_PATH)
+
 
 
 # User profile functions
@@ -758,6 +870,511 @@ def get_all_subject_analytics_summary() -> List[Dict[str, Any]]:
         return result
 
 
+# ==============================================================================
+# MATERIAL AUTOMATIC OVERVIEW FUNCTIONS
+# ==============================================================================
+def save_material_overview(doc_id: str, filename: str, subject: str, overview_data: Dict[str, Any]) -> None:
+    """Save or update generated material overview for a document."""
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO material_overviews (doc_id, filename, subject, overview_json, created_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                overview_json = excluded.overview_json,
+                created_at = CURRENT_TIMESTAMP
+        """, (doc_id, filename, subject.strip().title(), json.dumps(overview_data)))
+        conn.commit()
+
+
+def get_material_overview(doc_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve material overview by document ID."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM material_overviews WHERE doc_id = ?", (doc_id,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                data = json.loads(row["overview_json"])
+                data["doc_id"] = doc_id
+                return data
+            except Exception:
+                pass
+        return None
+
+
+# ==============================================================================
+# FEATURE 2 — STUDY SPACE DATABASE PERSISTENCE MODULE
+# ==============================================================================
+def create_study_space(
+    space_id: str,
+    owner_user_id: str,
+    owner_username: str,
+    name: str,
+    subject: str,
+    description: str,
+    invite_token: str
+) -> Dict[str, Any]:
+    """Create a new shared Study Space and register owner as first member."""
+    clean_name = name.strip()
+    clean_subject = subject.strip().title()
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_spaces (space_id, owner_user_id, owner_username, name, subject, description, invite_token, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, (space_id, owner_user_id, owner_username, clean_name, clean_subject, description.strip(), invite_token))
+        
+        # Add owner as 'owner' role member
+        conn.execute("""
+            INSERT INTO study_space_members (space_id, user_id, username, role, joined_at)
+            VALUES (?, ?, ?, 'owner', CURRENT_TIMESTAMP)
+            ON CONFLICT(space_id, user_id) DO UPDATE SET role = 'owner'
+        """, (space_id, owner_user_id, owner_username))
+        
+        # Log creation activity
+        act_id = f"act_{space_id}_created"
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, 'create', ?, CURRENT_TIMESTAMP)
+        """, (act_id, space_id, owner_user_id, owner_username, f"created study space '{clean_name}'"))
+
+        conn.commit()
+
+    return get_study_space_by_id(space_id) or {}
+
+
+def get_study_space_by_id(space_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch Study Space metadata by space_id."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_spaces WHERE space_id = ? AND status = 'active'", (space_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_study_space_by_token(invite_token: str) -> Optional[Dict[str, Any]]:
+    """Fetch Study Space metadata by secure invite_token."""
+    if not invite_token:
+        return None
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_spaces WHERE invite_token = ? AND status = 'active'", (invite_token.strip(),))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_user_study_spaces(user_id: str) -> List[Dict[str, Any]]:
+    """Retrieve all study spaces where user is a member or owner."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.*, m.role as user_role, m.joined_at
+            FROM study_spaces s
+            JOIN study_space_members m ON s.space_id = m.space_id
+            WHERE m.user_id = ? AND s.status = 'active'
+            ORDER BY s.updated_at DESC
+        """, (str(user_id),))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def update_study_space(space_id: str, user_id: str, name: str, subject: str, description: str) -> bool:
+    """Update study space details (Owner permission required)."""
+    if not is_study_space_owner(space_id, user_id):
+        return False
+    with get_connection() as conn:
+        conn.execute("""
+            UPDATE study_spaces 
+            SET name = ?, subject = ?, description = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE space_id = ?
+        """, (name.strip(), subject.strip().title(), description.strip(), space_id))
+        conn.commit()
+    return True
+
+
+def delete_study_space(space_id: str, user_id: str) -> bool:
+    """Delete a study space (Owner permission required)."""
+    if not is_study_space_owner(space_id, user_id):
+        return False
+    with get_connection() as conn:
+        conn.execute("UPDATE study_spaces SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE space_id = ?", (space_id,))
+        conn.commit()
+    return True
+
+
+def regenerate_invite_token(space_id: str, user_id: str, new_token: str) -> bool:
+    """Regenerate invite token for space (Owner permission required)."""
+    if not is_study_space_owner(space_id, user_id):
+        return False
+    with get_connection() as conn:
+        conn.execute("UPDATE study_spaces SET invite_token = ?, updated_at = CURRENT_TIMESTAMP WHERE space_id = ?", (new_token, space_id))
+        conn.commit()
+    return True
+
+
+def is_study_space_member(space_id: str, user_id: str) -> bool:
+    """Verify if user is a member or owner of the Study Space (Backend Security Gate)."""
+    if not space_id or not user_id:
+        return False
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM study_space_members WHERE space_id = ? AND user_id = ?", (space_id, str(user_id)))
+        return cursor.fetchone() is not None
+
+
+def is_study_space_owner(space_id: str, user_id: str) -> bool:
+    """Verify if user is the Owner of the Study Space."""
+    if not space_id or not user_id:
+        return False
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM study_spaces WHERE space_id = ? AND owner_user_id = ?", (space_id, str(user_id)))
+        return cursor.fetchone() is not None
+
+
+def add_study_space_member(space_id: str, user_id: str, username: str, role: str = "member") -> bool:
+    """Add a registered user to a Study Space."""
+    space = get_study_space_by_id(space_id)
+    if not space:
+        return False
+
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_members (space_id, user_id, username, role, joined_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(space_id, user_id) DO UPDATE SET username = excluded.username
+        """, (space_id, str(user_id), username, role))
+
+        # Log join activity
+        act_id = f"act_{space_id}_{user_id}_joined_{int(datetime.now().timestamp())}"
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, 'join', ?, CURRENT_TIMESTAMP)
+        """, (act_id, space_id, str(user_id), username, f"{username} joined the study space"))
+
+        conn.commit()
+    return True
+
+
+def remove_study_space_member(space_id: str, user_id: str, target_user_id: str) -> bool:
+    """Remove a member from space (Owner can remove anyone; members can leave themselves)."""
+    is_owner = is_study_space_owner(space_id, user_id)
+    is_self = (str(user_id) == str(target_user_id))
+    if not (is_owner or is_self):
+        return False
+
+    with get_connection() as conn:
+        conn.execute("DELETE FROM study_space_members WHERE space_id = ? AND user_id = ?", (space_id, str(target_user_id)))
+        conn.commit()
+    return True
+
+
+def get_study_space_members(space_id: str) -> List[Dict[str, Any]]:
+    """Get all members of a study space."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_members WHERE space_id = ? ORDER BY joined_at ASC", (space_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def save_study_space_document(
+    doc_id: str,
+    space_id: str,
+    uploaded_by: str,
+    uploaded_by_name: str,
+    filename: str,
+    file_type: str,
+    file_size_mb: float,
+    total_units: int,
+    storage_path: str = ""
+) -> bool:
+    """Register uploaded document in Study Space (Membership enforced)."""
+    if not is_study_space_member(space_id, uploaded_by):
+        return False
+
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_documents (doc_id, space_id, uploaded_by, uploaded_by_name, filename, file_type, file_size_mb, total_units, storage_path, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                filename = excluded.filename,
+                total_units = excluded.total_units
+        """, (doc_id, space_id, str(uploaded_by), uploaded_by_name, filename, file_type, file_size_mb, total_units, storage_path))
+
+        # Log document upload activity
+        act_id = f"act_{space_id}_doc_{doc_id}"
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, 'upload', ?, CURRENT_TIMESTAMP)
+        """, (act_id, space_id, str(uploaded_by), uploaded_by_name, f"{uploaded_by_name} uploaded study material '{filename}'"))
+
+        conn.commit()
+    return True
+
+
+def get_study_space_documents(space_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Retrieve shared materials in Study Space (Membership enforced)."""
+    if not is_study_space_member(space_id, user_id):
+        return []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_documents WHERE space_id = ? ORDER BY added_at DESC", (space_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def delete_study_space_document(doc_id: str, space_id: str, user_id: str) -> bool:
+    """Remove a shared material (Owner or original uploader only)."""
+    if not is_study_space_member(space_id, user_id):
+        return False
+    
+    # Check if user is owner or uploader
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT uploaded_by FROM study_space_documents WHERE doc_id = ? AND space_id = ?", (doc_id, space_id))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        if not (is_study_space_owner(space_id, user_id) or str(row["uploaded_by"]) == str(user_id)):
+            return False
+
+        conn.execute("DELETE FROM study_space_documents WHERE doc_id = ? AND space_id = ?", (doc_id, space_id))
+        conn.commit()
+    return True
+
+
+def save_study_space_message(
+    message_id: str,
+    space_id: str,
+    user_id: str,
+    sender_name: str,
+    message_text: str,
+    message_type: str = "chat"
+) -> bool:
+    """Save persistent group chat message/thought in Study Space."""
+    if not is_study_space_member(space_id, user_id):
+        return False
+
+    clean_text = message_text.strip()
+    if not clean_text:
+        return False
+
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_messages (message_id, space_id, user_id, sender_name, message_text, message_type, reactions_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, '{}', CURRENT_TIMESTAMP)
+        """, (message_id, space_id, str(user_id), sender_name, clean_text, message_type))
+        conn.commit()
+    return True
+
+
+def get_study_space_messages(space_id: str, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Fetch persistent chat messages in Study Space (Membership enforced)."""
+    if not is_study_space_member(space_id, user_id):
+        return []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_messages WHERE space_id = ? ORDER BY created_at ASC LIMIT ?", (space_id, limit))
+        rows = cursor.fetchall()
+        messages = []
+        for r in rows:
+            m = dict(r)
+            try:
+                m["reactions"] = json.loads(m.get("reactions_json") or "{}")
+            except Exception:
+                m["reactions"] = {}
+            messages.append(m)
+        return messages
+
+
+def toggle_message_reaction(message_id: str, space_id: str, user_id: str, emoji: str) -> bool:
+    """Add/remove emoji reaction to a chat message."""
+    if not is_study_space_member(space_id, user_id):
+        return False
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT reactions_json FROM study_space_messages WHERE message_id = ? AND space_id = ?", (message_id, space_id))
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        try:
+            reactions = json.loads(row["reactions_json"] or "{}")
+        except Exception:
+            reactions = {}
+
+        users_who_reacted = reactions.get(emoji, [])
+        if user_id in users_who_reacted:
+            users_who_reacted.remove(user_id)
+        else:
+            users_who_reacted.append(user_id)
+
+        if users_who_reacted:
+            reactions[emoji] = users_who_reacted
+        else:
+            reactions.pop(emoji, None)
+
+        conn.execute("UPDATE study_space_messages SET reactions_json = ? WHERE message_id = ?", (json.dumps(reactions), message_id))
+        conn.commit()
+    return True
+
+
+def log_study_space_activity(
+    activity_id: str,
+    space_id: str,
+    user_id: str,
+    username: str,
+    activity_type: str,
+    description: str
+) -> None:
+    """Log an activity event in Study Space."""
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (activity_id, space_id, str(user_id), username, activity_type, description))
+        conn.commit()
+
+
+def get_study_space_activity(space_id: str, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve activity log for Study Space (Membership enforced)."""
+    if not is_study_space_member(space_id, user_id):
+        return []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_activity WHERE space_id = ? ORDER BY created_at DESC LIMIT ?", (space_id, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def save_study_space_quiz(quiz_id: str, space_id: str, created_by: str, title: str, questions: List[Dict[str, Any]]) -> bool:
+    """Save shared group quiz in Study Space."""
+    if not is_study_space_member(space_id, created_by):
+        return False
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_quizzes (quiz_id, space_id, created_by, title, questions_json, created_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(quiz_id) DO UPDATE SET questions_json = excluded.questions_json
+        """, (quiz_id, space_id, created_by, title, json.dumps(questions)))
+
+        # Log activity
+        act_id = f"act_{space_id}_quiz_{quiz_id}"
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, 'quiz', ?, CURRENT_TIMESTAMP)
+        """, (act_id, space_id, created_by, created_by, f"started a new shared Group Quiz: {title}"))
+
+        conn.commit()
+    return True
+
+
+def get_study_space_quizzes(space_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Get all shared quizzes created in Study Space."""
+    if not is_study_space_member(space_id, user_id):
+        return []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_quizzes WHERE space_id = ? ORDER BY created_at DESC", (space_id,))
+        rows = cursor.fetchall()
+        quizzes = []
+        for r in rows:
+            q = dict(r)
+            try:
+                q["questions"] = json.loads(q["questions_json"])
+            except Exception:
+                q["questions"] = []
+            quizzes.append(q)
+        return quizzes
+
+
+def save_study_space_quiz_attempt(
+    attempt_id: str,
+    quiz_id: str,
+    space_id: str,
+    user_id: str,
+    username: str,
+    score: int,
+    total: int,
+    pct: float,
+    correct: int,
+    wrong: int
+) -> bool:
+    """Record individual member quiz attempt in Study Space."""
+    if not is_study_space_member(space_id, user_id):
+        return False
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO study_space_quiz_attempts (attempt_id, quiz_id, space_id, user_id, username, score, total_questions, percentage, correct_answers, wrong_answers, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(attempt_id) DO UPDATE SET score = excluded.score, percentage = excluded.percentage
+        """, (attempt_id, quiz_id, space_id, str(user_id), username, score, total, pct, correct, wrong))
+
+        # Log completion activity
+        act_id = f"act_{space_id}_attempt_{attempt_id}"
+        conn.execute("""
+            INSERT INTO study_space_activity (activity_id, space_id, user_id, username, activity_type, description, created_at)
+            VALUES (?, ?, ?, ?, 'quiz_complete', ?, CURRENT_TIMESTAMP)
+        """, (act_id, space_id, str(user_id), username, f"{username} completed Group Quiz ({score}/{total} - {pct}%)"))
+
+        conn.commit()
+    return True
+
+
+def get_study_space_quiz_attempts(space_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Get group quiz attempts in Study Space."""
+    if not is_study_space_member(space_id, user_id):
+        return []
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM study_space_quiz_attempts WHERE space_id = ? ORDER BY timestamp DESC", (space_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_study_space_aggregate_analytics(space_id: str, user_id: str) -> Dict[str, Any]:
+    """Calculate group aggregate metrics for Study Space (without revealing private individual answer choices)."""
+    if not is_study_space_member(space_id, user_id):
+        return {}
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Member count
+        cursor.execute("SELECT COUNT(*) as member_count FROM study_space_members WHERE space_id = ?", (space_id,))
+        member_count = cursor.fetchone()["member_count"]
+
+        # Shared materials count
+        cursor.execute("SELECT COUNT(*) as doc_count FROM study_space_documents WHERE space_id = ?", (space_id,))
+        doc_count = cursor.fetchone()["doc_count"]
+
+        # Shared quizzes count
+        cursor.execute("SELECT COUNT(*) as quiz_count FROM study_space_quizzes WHERE space_id = ?", (space_id,))
+        quiz_count = cursor.fetchone()["quiz_count"]
+
+        # Total messages
+        cursor.execute("SELECT COUNT(*) as msg_count FROM study_space_messages WHERE space_id = ?", (space_id,))
+        msg_count = cursor.fetchone()["msg_count"]
+
+        # Average group quiz score
+        cursor.execute("SELECT AVG(percentage) as avg_score FROM study_space_quiz_attempts WHERE space_id = ?", (space_id,))
+        avg_score_row = cursor.fetchone()
+        avg_score = round(avg_score_row["avg_score"] or 0.0, 1)
+
+        # Space details
+        cursor.execute("SELECT name, subject FROM study_spaces WHERE space_id = ?", (space_id,))
+        space_row = cursor.fetchone()
+        name = space_row["name"] if space_row else "Study Space"
+        subject = space_row["subject"] if space_row else "General"
+
+        return {
+            "space_id": space_id,
+            "name": name,
+            "subject": subject,
+            "member_count": member_count,
+            "shared_documents_count": doc_count,
+            "shared_quizzes_count": quiz_count,
+            "messages_count": msg_count,
+            "average_group_quiz_score": avg_score
+        }
+
+
 # Initialize database on module load
 init_db()
+
 
