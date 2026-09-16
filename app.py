@@ -1462,7 +1462,12 @@ def strip_html_tags(text: str) -> str:
     """Strip raw HTML/script tags from string to extract plain text."""
     if not isinstance(text, str):
         return str(text) if text is not None else ""
-    text = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     cleaned = re.sub(r"<[^>]+>", "", text)
     cleaned = cleaned.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
     return cleaned.strip()

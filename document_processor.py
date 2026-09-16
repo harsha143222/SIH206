@@ -281,7 +281,12 @@ def strip_html_tags(text: str) -> str:
     if not isinstance(text, str):
         return str(text) if text is not None else ""
     # Remove script tags and contents
-    text = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     # Strip HTML tags
     cleaned = re.sub(r'<[^>]+>', '', text)
     # Unescape common HTML entities
