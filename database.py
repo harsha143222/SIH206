@@ -28,17 +28,24 @@ def init_db() -> None:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Users table with email and password_hash support
+        # Users table with complete profile, authentication, and status support
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
+                display_name TEXT,
+                full_name TEXT,
                 email TEXT,
                 password_hash TEXT,
+                avatar TEXT DEFAULT '🎓',
+                role TEXT DEFAULT 'student',
                 coin_balance INTEGER DEFAULT 100,
                 streak_days INTEGER DEFAULT 1,
                 last_active_date TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_login DATETIME,
+                is_active INTEGER DEFAULT 1
             )
         """)
         
@@ -51,6 +58,22 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         if "display_name" not in columns:
             cursor.execute("ALTER TABLE users ADD COLUMN display_name TEXT")
+        if "full_name" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+        if "avatar" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT '🎓'")
+        if "role" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'student'")
+        if "created_at" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN created_at DATETIME")
+        if "last_login" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_login DATETIME")
+        if "is_active" not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)")
 
         # Subjects table
         cursor.execute("""
@@ -372,32 +395,63 @@ def init_db() -> None:
             )
         """)
 
+        # Safe idempotent column migrations for Study Space tables
+        cursor.execute("PRAGMA table_info(study_spaces)")
+        ss_cols = [row[1] for row in cursor.fetchall()]
+        if "status" not in ss_cols:
+            cursor.execute("ALTER TABLE study_spaces ADD COLUMN status TEXT DEFAULT 'active'")
+        if "invite_token" not in ss_cols:
+            cursor.execute("ALTER TABLE study_spaces ADD COLUMN invite_token TEXT")
+        if "description" not in ss_cols:
+            cursor.execute("ALTER TABLE study_spaces ADD COLUMN description TEXT")
+
+        cursor.execute("PRAGMA table_info(study_space_members)")
+        ssm_cols = [row[1] for row in cursor.fetchall()]
+        if "role" not in ssm_cols:
+            cursor.execute("ALTER TABLE study_space_members ADD COLUMN role TEXT DEFAULT 'member'")
+
+        cursor.execute("PRAGMA table_info(study_space_messages)")
+        ssmsg_cols = [row[1] for row in cursor.fetchall()]
+        if "message_type" not in ssmsg_cols:
+            cursor.execute("ALTER TABLE study_space_messages ADD COLUMN message_type TEXT DEFAULT 'chat'")
+        if "reactions_json" not in ssmsg_cols:
+            cursor.execute("ALTER TABLE study_space_messages ADD COLUMN reactions_json TEXT DEFAULT '{}'")
+
+        cursor.execute("PRAGMA table_info(study_space_documents)")
+        ssdoc_cols = [row[1] for row in cursor.fetchall()]
+        if "storage_path" not in ssdoc_cols:
+            cursor.execute("ALTER TABLE study_space_documents ADD COLUMN storage_path TEXT")
+
         conn.commit()
     logger.info("Database initialized successfully at %s", config.DB_PATH)
 
 
 
 # User profile functions
-def save_user_profile(user_id: str, username: str, coin_balance: int, streak_days: int, last_active_date: str, email: str = "", password_hash: str = "", display_name: str = "") -> None:
+def save_user_profile(user_id: str, username: str, coin_balance: int, streak_days: int, last_active_date: str, email: str = "", password_hash: str = "", display_name: str = "", avatar: str = "🎓", role: str = "student", full_name: str = "") -> None:
     clean_u = username.strip()
     clean_e = email.strip().lower()
     disp = display_name.strip() if display_name else clean_u
+    fname = full_name.strip() if full_name else disp
 
     try:
         with get_connection() as conn:
             conn.execute("""
-                INSERT INTO users (user_id, username, display_name, email, password_hash, coin_balance, streak_days, last_active_date, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO users (user_id, username, display_name, full_name, email, password_hash, avatar, role, coin_balance, streak_days, last_active_date, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username = excluded.username,
                     display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE users.display_name END,
+                    full_name = CASE WHEN excluded.full_name != '' THEN excluded.full_name ELSE users.full_name END,
                     email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
                     password_hash = CASE WHEN excluded.password_hash != '' THEN excluded.password_hash ELSE users.password_hash END,
+                    avatar = CASE WHEN excluded.avatar != '' THEN excluded.avatar ELSE users.avatar END,
+                    role = CASE WHEN excluded.role != '' THEN excluded.role ELSE users.role END,
                     coin_balance = excluded.coin_balance,
                     streak_days = excluded.streak_days,
                     last_active_date = excluded.last_active_date,
                     updated_at = CURRENT_TIMESTAMP
-            """, (user_id, clean_u, disp, clean_e, password_hash, coin_balance, streak_days, last_active_date))
+            """, (user_id, clean_u, disp, fname, clean_e, password_hash, avatar, role, coin_balance, streak_days, last_active_date))
             conn.commit()
     except sqlite3.IntegrityError:
         try:
@@ -405,18 +459,34 @@ def save_user_profile(user_id: str, username: str, coin_balance: int, streak_day
                 conn.execute("""
                     UPDATE users SET
                         display_name = CASE WHEN ? != '' THEN ? ELSE display_name END,
+                        full_name = CASE WHEN ? != '' THEN ? ELSE full_name END,
                         password_hash = CASE WHEN ? != '' THEN ? ELSE password_hash END,
+                        avatar = CASE WHEN ? != '' THEN ? ELSE avatar END,
                         coin_balance = ?,
                         streak_days = ?,
                         last_active_date = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE LOWER(username) = LOWER(?) OR (email != '' AND LOWER(email) = LOWER(?))
-                """, (disp, disp, password_hash, password_hash, coin_balance, streak_days, last_active_date, clean_u, clean_e))
+                """, (disp, disp, fname, fname, password_hash, password_hash, avatar, avatar, coin_balance, streak_days, last_active_date, clean_u, clean_e))
                 conn.commit()
         except Exception as e:
             logger.error("Error updating existing user profile: %s", str(e))
     except Exception as e:
         logger.error("Error saving user profile: %s", str(e))
+
+
+def update_user_last_login(user_id: str) -> None:
+    """Update last_login timestamp for SQLite users table."""
+    if not user_id:
+        return
+    try:
+        with get_connection() as conn:
+            conn.execute("""
+                UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = ?
+            """, (str(user_id),))
+            conn.commit()
+    except Exception as e:
+        logger.error("Error updating last login timestamp: %s", str(e))
 
 
 def get_user_profile(identifier: str) -> Optional[Dict[str, Any]]:
@@ -944,11 +1014,18 @@ def create_study_space(
 
 def get_study_space_by_id(space_id: str) -> Optional[Dict[str, Any]]:
     """Fetch Study Space metadata by space_id."""
+    if not space_id:
+        return None
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM study_spaces WHERE space_id = ? AND status = 'active'", (space_id,))
+        cursor.execute("SELECT * FROM study_spaces WHERE space_id = ? AND status = 'active'", (str(space_id),))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def get_study_space(space_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch Study Space metadata by space_id (Alias for get_study_space_by_id)."""
+    return get_study_space_by_id(space_id)
 
 
 def get_study_space_by_token(invite_token: str) -> Optional[Dict[str, Any]]:
@@ -964,15 +1041,20 @@ def get_study_space_by_token(invite_token: str) -> Optional[Dict[str, Any]]:
 
 def get_user_study_spaces(user_id: str) -> List[Dict[str, Any]]:
     """Retrieve all study spaces where user is a member or owner."""
+    if not user_id:
+        return []
+    uid_str = str(user_id)
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.*, m.role as user_role, m.joined_at
+            SELECT DISTINCT s.*, 
+                   COALESCE(m.role, CASE WHEN s.owner_user_id = ? THEN 'owner' ELSE 'member' END) as user_role,
+                   COALESCE(m.joined_at, s.created_at) as joined_at
             FROM study_spaces s
-            JOIN study_space_members m ON s.space_id = m.space_id
-            WHERE m.user_id = ? AND s.status = 'active'
+            LEFT JOIN study_space_members m ON s.space_id = m.space_id AND m.user_id = ?
+            WHERE (s.owner_user_id = ? OR m.user_id = ?) AND s.status = 'active'
             ORDER BY s.updated_at DESC
-        """, (str(user_id),))
+        """, (uid_str, uid_str, uid_str, uid_str))
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -1014,9 +1096,14 @@ def is_study_space_member(space_id: str, user_id: str) -> bool:
     """Verify if user is a member or owner of the Study Space (Backend Security Gate)."""
     if not space_id or not user_id:
         return False
+    uid_str = str(user_id)
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM study_space_members WHERE space_id = ? AND user_id = ?", (space_id, str(user_id)))
+        cursor.execute("""
+            SELECT 1 FROM study_space_members WHERE space_id = ? AND user_id = ?
+            UNION
+            SELECT 1 FROM study_spaces WHERE space_id = ? AND owner_user_id = ? AND status = 'active'
+        """, (space_id, uid_str, space_id, uid_str))
         return cursor.fetchone() is not None
 
 
@@ -1110,6 +1197,23 @@ def save_study_space_document(
     return True
 
 
+def add_study_space_document(
+    doc_id: str,
+    space_id: str,
+    uploaded_by: str,
+    uploaded_by_name: str,
+    filename: str,
+    file_type: str,
+    file_size_mb: float,
+    total_units: int,
+    storage_path: str = ""
+) -> bool:
+    """Register uploaded document in Study Space (Alias for save_study_space_document)."""
+    return save_study_space_document(
+        doc_id, space_id, uploaded_by, uploaded_by_name, filename, file_type, file_size_mb, total_units, storage_path
+    )
+
+
 def get_study_space_documents(space_id: str, user_id: str) -> List[Dict[str, Any]]:
     """Retrieve shared materials in Study Space (Membership enforced)."""
     if not is_study_space_member(space_id, user_id):
@@ -1163,6 +1267,18 @@ def save_study_space_message(
         """, (message_id, space_id, str(user_id), sender_name, clean_text, message_type))
         conn.commit()
     return True
+
+
+def add_study_space_message(
+    message_id: str,
+    space_id: str,
+    user_id: str,
+    sender_name: str,
+    message_text: str,
+    message_type: str = "chat"
+) -> bool:
+    """Save persistent group chat message in Study Space (Alias for save_study_space_message)."""
+    return save_study_space_message(message_id, space_id, user_id, sender_name, message_text, message_type)
 
 
 def get_study_space_messages(space_id: str, user_id: str, limit: int = 100) -> List[Dict[str, Any]]:

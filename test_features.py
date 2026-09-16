@@ -123,7 +123,20 @@ def run_tests():
     )
     assert space["space_id"] == space_id, "Study space creation failed"
     assert space["invite_token"] == token, "Invite token mismatch"
-    print(f"TEST 9 & 10 PASSED: Study space created with secure invite token '{token[:8]}...'")
+
+    # Verify get_study_space alias and get_user_study_spaces for User A
+    sp_lookup = database.get_study_space(space_id)
+    assert sp_lookup is not None and sp_lookup["space_id"] == space_id, "get_study_space lookup failed"
+    
+    user_a_spaces = database.get_user_study_spaces(user_a_id)
+    assert len(user_a_spaces) >= 1, "User A study spaces list is empty"
+    assert any(s["space_id"] == space_id for s in user_a_spaces), "Created space missing in User A dashboard list"
+    
+    # Verify non-member empty spaces list
+    non_mem_spaces = database.get_user_study_spaces(non_member_id)
+    assert len(non_mem_spaces) == 0, "Non-member should have empty study spaces list"
+    
+    print(f"TEST 9 & 10 PASSED: Study space created & verified in User A dashboard list.")
 
     # TEST 11 & 12: Second user opens invite token and joins
     space_from_tok = database.get_study_space_by_token(token)
@@ -134,7 +147,13 @@ def run_tests():
     members = database.get_study_space_members(space_id)
     member_ids = [m["user_id"] for m in members]
     assert user_a_id in member_ids and user_b_id in member_ids, "Members list incomplete"
-    print(f"TEST 11 & 12 PASSED: User B joined space. Members count: {len(members)}")
+
+    # Verify space now appears in User B dashboard list
+    user_b_spaces = database.get_user_study_spaces(user_b_id)
+    assert len(user_b_spaces) >= 1, "User B study spaces list is empty after joining"
+    assert any(s["space_id"] == space_id for s in user_b_spaces), "Joined space missing in User B dashboard list"
+
+    print(f"TEST 11 & 12 PASSED: User B joined space via token & verified in User B dashboard list.")
 
     # TEST 13: Shared Study Material & RAG Data Isolation
     space_doc_id = f"sdoc_dsa_{run_suffix}"
@@ -148,7 +167,7 @@ def run_tests():
         "file_size_mb": 2.5,
         "total_units": 10
     }
-    database.save_study_space_document(
+    database.add_study_space_document(
         doc_id=space_doc_id,
         space_id=space_id,
         uploaded_by=user_a_id,
@@ -165,14 +184,14 @@ def run_tests():
     print("TEST 13 PASSED: Both User A and User B can access shared material 'DSA_Full_Course.pdf'.")
 
     # TEST 14, 15, 16, 17: Persistent Group Chat
-    database.save_study_space_message(f"msg_1_{run_suffix}", space_id, user_a_id, user_a_name, "Does anyone understand recursion?", "question")
+    database.add_study_space_message(f"msg_1_{run_suffix}", space_id, user_a_id, user_a_name, "Does anyone understand recursion?", "question")
     messages_b = database.get_study_space_messages(space_id, user_b_id)
     assert len(messages_b) == 1 and messages_b[0]["sender_name"] == user_a_name, "User B cannot see User A's message"
 
-    database.save_study_space_message(f"msg_2_{run_suffix}", space_id, user_b_id, user_b_name, "Yes, think of it as a function calling itself.", "chat")
+    database.add_study_space_message(f"msg_2_{run_suffix}", space_id, user_b_id, user_b_name, "Yes, think of it as a function calling itself.", "chat")
     messages_a = database.get_study_space_messages(space_id, user_a_id)
     assert len(messages_a) == 2 and messages_a[1]["sender_name"] == user_b_name, "User A cannot see User B's response"
-    print("TEST 14, 15, 16, 17 PASSED: Persistent chat messages exchanged and visible to all members.")
+    print("TEST 14, 15, 16, 17 PASSED: Persistent chat messages exchanged bi-directionally between User A and User B.")
 
     # TEST 18 & 19: RAG Data Isolation for Non-Members & Members
     non_member_docs = database.get_study_space_documents(space_id, non_member_id)

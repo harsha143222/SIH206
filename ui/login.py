@@ -151,4 +151,4 @@ Your personalized Gemini AI-powered tutor for Smart India Hackathon 2026. Instan
                 st.rerun()
         with col_forgot:
             if st.button("🔑 Forgot Password?", use_container_width=True, key="btn_forgot_pw"):
-                st.info("💡 Password reset instructions will be sent to your registered email.")
+                st.info("Password reset is not configured yet. Please contact the administrator.")

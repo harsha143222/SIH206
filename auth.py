@@ -5,6 +5,8 @@ and server-side session state tracking.
 """
 
 import re
+import secrets
+import hashlib
 import logging
 from typing import Tuple, Dict, Any, Optional
 import streamlit as st
@@ -29,7 +31,7 @@ except ImportError:
     HAS_BCRYPT = False
 
 def hash_password(password: str) -> str:
-    """Hash plaintext password securely using werkzeug, bcrypt, or pbkdf2_hmac."""
+    """Hash plaintext password securely using werkzeug, bcrypt, or pbkdf2_hmac with random salt."""
     if not password:
         return ""
     if HAS_WERKZEUG:
@@ -43,8 +45,11 @@ def hash_password(password: str) -> str:
             return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
         except Exception as e:
             logger.warning("bcrypt hashpw failed: %s", str(e))
-    import hashlib
-    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
+    
+    # Fallback to PBKDF2 with random salt per password
+    salt = secrets.token_hex(16)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
+    return f"pbkdf2:{salt}:{key}"
 
 def verify_password(password: str, hashed: str) -> bool:
     """Verify plaintext password against stored password hash across all hashing engines."""
@@ -64,7 +69,16 @@ def verify_password(password: str, hashed: str) -> bool:
                 except Exception:
                     pass
 
-        # 2. Check werkzeug hashes (pbkdf2, scrypt, sha256)
+        # 2. Check custom pbkdf2 formatted hash "pbkdf2:<salt>:<key>"
+        if clean_hash.startswith('pbkdf2:'):
+            parts = clean_hash.split(':')
+            if len(parts) == 3:
+                salt = parts[1]
+                stored_key = parts[2]
+                computed_key = hashlib.pbkdf2_hmac('sha256', clean_pw.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
+                return secrets.compare_digest(computed_key, stored_key)
+
+        # 3. Check werkzeug hashes (pbkdf2, scrypt, sha256)
         if HAS_WERKZEUG and (':' in clean_hash or '$' in clean_hash):
             try:
                 if check_password_hash(clean_hash, clean_pw):
@@ -72,13 +86,12 @@ def verify_password(password: str, hashed: str) -> bool:
             except Exception:
                 pass
 
-        # 3. Check plain hashlib pbkdf2_hmac hex hash
-        import hashlib
-        computed = hashlib.pbkdf2_hmac('sha256', clean_pw.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
-        if computed == clean_hash:
+        # 4. Check plain hashlib pbkdf2_hmac hex hash with constant salt (legacy compatibility)
+        computed_legacy = hashlib.pbkdf2_hmac('sha256', clean_pw.encode('utf-8'), b'edumind_salt_2026', 100000).hex()
+        if secrets.compare_digest(computed_legacy, clean_hash):
             return True
 
-        # 4. Fallback check_password_hash if HAS_WERKZEUG
+        # 5. Final fallback check_password_hash if HAS_WERKZEUG
         if HAS_WERKZEUG:
             try:
                 return check_password_hash(clean_hash, clean_pw)
@@ -181,7 +194,19 @@ def register_user(email: str, username: str, password: str, display_name: str = 
     )
 
     # Sync with SQLite for dual compatibility
-    database.save_user_profile(user_id, clean_username, 100, 1, "", email=clean_email, password_hash=pw_hash, display_name=clean_display_name)
+    database.save_user_profile(
+        user_id=user_id,
+        username=clean_username,
+        coin_balance=100,
+        streak_days=1,
+        last_active_date="",
+        email=clean_email,
+        password_hash=pw_hash,
+        display_name=clean_display_name,
+        avatar=avatar,
+        role="student",
+        full_name=clean_display_name
+    )
 
     return True, "Account created successfully. Welcome to EduMind AI!"
 
@@ -217,7 +242,10 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
         coins = sqlite_user.get("coin_balance", 100)
         streak = sqlite_user.get("streak_days", 1)
         email = sqlite_user.get("email") or f"{clean_id}@edumind.app"
+        avatar = sqlite_user.get("avatar") or "🎓"
         
+        database.update_user_last_login(user_id)
+
         # Set session state
         st.session_state.authenticated = True
         st.session_state.user_id = user_id
@@ -225,7 +253,7 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
         st.session_state.username = username
         st.session_state.user_name = display_name
         st.session_state.display_name = display_name
-        st.session_state.avatar = "🎓"
+        st.session_state.avatar = avatar
         st.session_state.user_bio = "EduMind AI Scholar"
         st.session_state.member_since = "September 2026"
         st.session_state.coin_balance = coins
@@ -242,6 +270,7 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
 
     # Update last login timestamp
     mongodb.update_user_last_login(user_id)
+    database.update_user_last_login(user_id)
 
     # Fetch profile and user details
     profile = mongodb.get_profile(user_id) or {}
@@ -272,6 +301,68 @@ def login_user(identifier: str, password: str) -> Tuple[bool, str]:
     st.session_state.current_streak = streak
 
     return True, f"Welcome back, {display_name}!"
+
+def change_password(user_id: str, current_password: str, new_password: str) -> Tuple[bool, str]:
+    """Securely change user password across active persistence engines."""
+    if not user_id or not current_password or not new_password:
+        return False, "Please fill in all password fields."
+
+    val_p, msg_p = validate_password(new_password)
+    if not val_p:
+        return False, msg_p
+
+    # Search MongoDB Atlas first, then SQLite
+    user = mongodb.find_user_by_id(user_id)
+    sqlite_user = database.get_user_profile(user_id)
+
+    stored_hash = ""
+    if user and user.get("password_hash"):
+        stored_hash = user["password_hash"]
+    elif sqlite_user and sqlite_user.get("password_hash"):
+        stored_hash = sqlite_user["password_hash"]
+
+    if not stored_hash or not verify_password(current_password, stored_hash):
+        return False, "Current password is incorrect."
+
+    new_hash = hash_password(new_password)
+
+    # Update MongoDB
+    db = mongodb.get_db()
+    if db is not None:
+        try:
+            try:
+                oid = mongodb.ObjectId(user_id)
+                db.users.update_one({"_id": oid}, {"$set": {"password_hash": new_hash}})
+            except Exception:
+                db.users.update_one({"_id": user_id}, {"$set": {"password_hash": new_hash}})
+        except Exception as e:
+            logger.error("Failed to update password in MongoDB: %s", str(e))
+
+    # Update SQLite
+    if sqlite_user:
+        username = sqlite_user.get("username", "")
+        coins = sqlite_user.get("coin_balance", 100)
+        streak = sqlite_user.get("streak_days", 1)
+        email = sqlite_user.get("email", "")
+        disp = sqlite_user.get("display_name", username)
+        avatar = sqlite_user.get("avatar", "🎓")
+        role = sqlite_user.get("role", "student")
+        full_name = sqlite_user.get("full_name", disp)
+        database.save_user_profile(
+            user_id=user_id,
+            username=username,
+            coin_balance=coins,
+            streak_days=streak,
+            last_active_date="",
+            email=email,
+            password_hash=new_hash,
+            display_name=disp,
+            avatar=avatar,
+            role=role,
+            full_name=full_name
+        )
+
+    return True, "Password updated successfully!"
 
 def logout_user():
     """Clear authentication and user-specific session state."""

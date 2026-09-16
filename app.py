@@ -8,6 +8,7 @@ import os
 import datetime
 import secrets
 import time
+import uuid
 import streamlit as st
 import config
 import database
@@ -1709,7 +1710,7 @@ def render_study_spaces_page():
     st.markdown("---")
 
     if not user_spaces:
-        st.info("💡 You have not joined any Study Spaces yet. Create your first Study Space or join one using an invite link above!")
+        st.info("💡 You haven't joined or created any study spaces yet. Create your first Study Space or join one using an invite link above!")
         return
 
     # Select Active Study Space

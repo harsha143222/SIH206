@@ -25,6 +25,27 @@ def render_settings_page():
         st.write(f"**Registered Email:** `{st.session_state.get('user_email', 'N/A')}`")
         st.write(f"**User ID:** `{st.session_state.get('user_id', 'N/A')}`")
 
+        st.markdown("---")
+        st.markdown("### 🔑 Change Password")
+        with st.form("change_password_form"):
+            curr_pw = st.text_input("Current Password", type="password", key="settings_curr_pw")
+            new_pw = st.text_input("New Password", type="password", key="settings_new_pw")
+            conf_pw = st.text_input("Confirm New Password", type="password", key="settings_conf_pw")
+            submit_pw_change = st.form_submit_button("Update Password 🔒", type="primary")
+
+            if submit_pw_change:
+                if not curr_pw or not new_pw or not conf_pw:
+                    st.error("Please fill in all password fields.")
+                elif new_pw != conf_pw:
+                    st.error("New passwords do not match.")
+                else:
+                    user_id = st.session_state.get("user_id")
+                    ok, msg = auth.change_password(user_id, curr_pw, new_pw)
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.error(f"❌ {msg}")
+
     with tab_voice:
         st.markdown("### 🎙️ AI Tutor Voice Settings")
         current_voice = st.session_state.get("selected_voice_gender", "Female")
