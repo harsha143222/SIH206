@@ -1458,9 +1458,20 @@ def render_games_section():
 # ==============================================================================
 # FEATURE 1 — AUTOMATIC MATERIAL OVERVIEW & MATERIAL-SPECIFIC QUIZ UI
 # ==============================================================================
+def strip_html_tags(text: str) -> str:
+    """Strip raw HTML/script tags from string to extract plain text."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
+    text = re.sub(r'<script\b[^<]*(?:(?!</script>)<[^<]*)*</script>', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'<[^>]+>', '', text)
+    cleaned = cleaned.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
+    return cleaned.strip()
+
+
 def render_material_overview_card(doc_data: Dict[str, Any]):
     """
     Render Feature 1: Automatic Material Overview + Grounded Material Quiz buttons.
+    Renders styled HTML UI without raw HTML tags visible on screen.
     """
     if not doc_data or not isinstance(doc_data, dict):
         return
@@ -1468,7 +1479,15 @@ def render_material_overview_card(doc_data: Dict[str, Any]):
     ov = doc_data.get("overview")
     if not ov:
         ov = database.get_material_overview(doc_data.get("doc_id", ""))
-    if not ov:
+
+    if isinstance(ov, str):
+        try:
+            import json
+            ov = json.loads(ov)
+        except Exception:
+            ov = None
+
+    if not isinstance(ov, dict):
         ov = {
             "document_title": doc_data.get("filename", "Uploaded Material"),
             "subject": doc_data.get("subject", config.DEFAULT_SUBJECT),
@@ -1479,68 +1498,82 @@ def render_material_overview_card(doc_data: Dict[str, Any]):
             "exam_points": ["Key concepts in document"]
         }
 
-    title = ov.get("document_title") or doc_data.get("filename", "Study Material")
-    subject = ov.get("subject") or doc_data.get("subject", config.DEFAULT_SUBJECT)
+    title = strip_html_tags(str(ov.get("document_title") or doc_data.get("filename", "Study Material")))
+    subject = strip_html_tags(str(ov.get("subject") or doc_data.get("subject", config.DEFAULT_SUBJECT)))
     total_units = ov.get("total_units") or doc_data.get("total_units", 1)
     file_type = doc_data.get("file_type", "PDF/PPT")
     unit_label = "Slides" if str(file_type).upper() in ["PPT", "PPTX"] else "Pages"
 
-    main_topics = ov.get("main_topics", [])
-    key_concepts = ov.get("key_concepts", [])
-    rec_order = ov.get("recommended_order", [])
-    exam_points = ov.get("exam_points", [])
+    def clean_items(raw_data: Any, fallback: List[str]) -> List[str]:
+        if isinstance(raw_data, list):
+            res = [strip_html_tags(str(x)) for x in raw_data if strip_html_tags(str(x))]
+            return res if res else fallback
+        elif isinstance(raw_data, str) and raw_data.strip():
+            clean = strip_html_tags(raw_data)
+            return [clean] if clean else fallback
+        return fallback
 
-    st.markdown(
-        f"""
-        <div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%); border: 1.5px solid rgba(99, 102, 241, 0.45); border-radius: 16px; padding: 1.4rem; margin-bottom: 1.2rem; box-shadow: 0 8px 25px rgba(0, 0, 0, 0.35);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.9rem; border-bottom: 1px solid rgba(148, 163, 184, 0.2); padding-bottom: 0.6rem;">
-                <div>
-                    <h3 style="color: #60A5FA; margin: 0; font-size: 1.3rem;">📄 {title}</h3>
-                    <div style="font-size: 0.88rem; color: #94A3B8; margin-top: 0.2rem;">Subject: <b>{subject}</b> • <b>{total_units} {unit_label}</b> parsed & indexed</div>
-                </div>
-                <div>
-                    <span class="badge-pill badge-strong">● AI Overview Generated</span>
-                </div>
+    main_topics = clean_items(ov.get("main_topics"), ["General Overview"])
+    key_concepts = clean_items(ov.get("key_concepts"), ["Course Notes"])
+    rec_order = clean_items(ov.get("recommended_order"), ["1. Review material"])
+    exam_points = clean_items(ov.get("exam_points"), ["Key concepts in document"])
+
+    import html
+    topics_html = "".join(f"<li style='margin-bottom: 0.35rem;'><b>{html.escape(t)}</b></li>" for t in main_topics)
+    concepts_html = "".join(f"<li style='margin-bottom: 0.35rem;'>{html.escape(c)}</li>" for c in key_concepts)
+    order_html = "".join(f"<li style='margin-bottom: 0.35rem;'>{html.escape(o)}</li>" for o in rec_order)
+    exam_html = "".join(f"<li style='margin-bottom: 0.35rem;'>{html.escape(p)}</li>" for p in exam_points)
+
+    card_html = f"""
+    <div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%); border: 1.5px solid rgba(99, 102, 241, 0.45); border-radius: 16px; padding: 1.4rem; margin-bottom: 1.2rem; box-shadow: 0 8px 25px rgba(0, 0, 0, 0.35);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.9rem; border-bottom: 1px solid rgba(148, 163, 184, 0.2); padding-bottom: 0.6rem; flex-wrap: wrap; gap: 0.5rem;">
+            <div>
+                <h3 style="color: #60A5FA; margin: 0; font-size: 1.3rem;">📄 {html.escape(title)}</h3>
+                <div style="font-size: 0.88rem; color: #94A3B8; margin-top: 0.2rem;">Subject: <b>{html.escape(subject)}</b> • <b>{total_units} {unit_label}</b> parsed & indexed</div>
             </div>
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 0.8rem;">
-                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
-                    <h4 style="color: #818CF8; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">📌 Main Topics:</h4>
-                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
-                        {"".join(f"<li><b>{t}</b></li>" for t in main_topics)}
-                    </ul>
-                </div>
-                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
-                    <h4 style="color: #34D399; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">💡 Key Concepts:</h4>
-                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
-                        {"".join(f"<li>{c}</li>" for c in key_concepts)}
-                    </ul>
-                </div>
-            </div>
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
-                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
-                    <h4 style="color: #FBBF24; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🗺️ Recommended Learning Order:</h4>
-                    <ol style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
-                        {"".join(f"<li>{o}</li>" for o in rec_order)}
-                    </ol>
-                </div>
-                <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
-                    <h4 style="color: #F87171; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🎯 Important Exam Points:</h4>
-                    <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
-                        {"".join(f"<li>{p}</li>" for p in exam_points)}
-                    </ul>
-                </div>
-            </div>
-
-            <div style="background: rgba(99, 102, 241, 0.18); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 14px; padding: 0.9rem; text-align: center;">
-                <h4 style="color: #F8FAFC; margin: 0 0 0.3rem 0;">Ready to test your understanding?</h4>
-                <div style="color: #CBD5E1; font-size: 0.85rem;">Generate a personalized quiz grounded ONLY in this uploaded material.</div>
+            <div>
+                <span class="badge-pill badge-strong">● AI Overview Generated</span>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 0.8rem;">
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                <h4 style="color: #818CF8; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">📌 Main Topics:</h4>
+                <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                    {topics_html}
+                </ul>
+            </div>
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                <h4 style="color: #34D399; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">💡 Key Concepts:</h4>
+                <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                    {concepts_html}
+                </ul>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                <h4 style="color: #FBBF24; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🗺️ Recommended Learning Order:</h4>
+                <ol style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                    {order_html}
+                </ol>
+            </div>
+            <div style="background: rgba(30, 41, 59, 0.7); padding: 1rem; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.15);">
+                <h4 style="color: #F87171; margin-top: 0; margin-bottom: 0.4rem; font-size: 0.95rem;">🎯 Important Exam Points:</h4>
+                <ul style="margin: 0; padding-left: 1.1rem; color: #E2E8F0; font-size: 0.88rem; line-height: 1.4;">
+                    {exam_html}
+                </ul>
+            </div>
+        </div>
+
+        <div style="background: rgba(99, 102, 241, 0.18); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 14px; padding: 0.9rem; text-align: center;">
+            <h4 style="color: #F8FAFC; margin: 0 0 0.3rem 0;">Ready to test your understanding?</h4>
+            <div style="color: #CBD5E1; font-size: 0.85rem;">Generate a personalized quiz grounded ONLY in this uploaded material.</div>
+        </div>
+    </div>
+    """
+
+    st.markdown(card_html, unsafe_allow_html=True)
 
     doc_key = doc_data.get("doc_id", f"doc_{hash(title)}")
 

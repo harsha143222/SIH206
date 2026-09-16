@@ -276,16 +276,32 @@ def process_uploaded_file(
     return doc_data
 
 
+def strip_html_tags(text: str) -> str:
+    """Strip raw HTML/script tags from a string to extract plain text."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
+    # Remove script tags and contents
+    text = re.sub(r'<script\b[^<]*(?:(?!</script>)<[^<]*)*</script>', '', text, flags=re.IGNORECASE)
+    # Strip HTML tags
+    cleaned = re.sub(r'<[^>]+>', '', text)
+    # Unescape common HTML entities
+    cleaned = cleaned.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
+    return cleaned.strip()
+
+
 def generate_material_overview(chunks: List[Dict[str, Any]], filename: str, subject: str, total_units: int = 1) -> Dict[str, Any]:
     """
     Automatically generate a structured academic overview of uploaded material using Gemini AI.
     Contains: Document title, Subject, Number of pages/slides, Main topics, Key concepts, Recommended order, Exam focus.
     Grounded STRICTLY in the uploaded material.
     """
+    clean_fn = strip_html_tags(filename)
+    clean_sub = strip_html_tags(subject)
+
     if not chunks:
         return {
-            "document_title": filename,
-            "subject": subject,
+            "document_title": clean_fn,
+            "subject": clean_sub,
             "total_units": total_units,
             "main_topics": ["General Overview"],
             "key_concepts": ["Course Notes"],
@@ -298,12 +314,13 @@ def generate_material_overview(chunks: List[Dict[str, Any]], filename: str, subj
         context_text = context_text[:8000]
 
     prompt = f"""
-Analyze the following uploaded study material for the subject '{subject}'.
-DOCUMENT FILENAME: {filename}
+Analyze the following uploaded study material for the subject '{clean_sub}'.
+DOCUMENT FILENAME: {clean_fn}
 EXTRACTED CONTENT:
 {context_text}
 
 Generate a comprehensive academic overview grounded STRICTLY in this material. Do NOT invent topics not present in the content.
+Do NOT output raw HTML tags or wrap list items in HTML markup. Return ONLY clean JSON.
 
 OUTPUT JSON FORMAT:
 {{
@@ -315,22 +332,39 @@ OUTPUT JSON FORMAT:
 """
     try:
         data = gemini_client.generate_json_response(prompt)
-        main_topics = data.get("main_topics") or ["Overview of " + filename]
-        key_concepts = data.get("key_concepts") or ["Core Concepts"]
-        recommended_order = data.get("recommended_order") or [f"{i+1}. {t}" for i, t in enumerate(main_topics)]
-        exam_points = data.get("exam_points") or ["Key definitions and formulas"]
+        if isinstance(data, str):
+            import json
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+
+        def sanitize_list(items: Any, default: List[str]) -> List[str]:
+            if isinstance(items, list):
+                res = [strip_html_tags(str(x)) for x in items if strip_html_tags(str(x))]
+                return res if res else default
+            elif isinstance(items, str) and items.strip():
+                clean = strip_html_tags(items)
+                return [clean] if clean else default
+            return default
+
+        main_topics = sanitize_list(data.get("main_topics"), ["Overview of " + clean_fn])
+        key_concepts = sanitize_list(data.get("key_concepts"), ["Core Concepts"])
+        recommended_order = sanitize_list(data.get("recommended_order"), [f"{i+1}. {t}" for i, t in enumerate(main_topics)])
+        exam_points = sanitize_list(data.get("exam_points"), ["Key definitions and formulas"])
+
     except Exception as e:
         logger.warning("Failed to generate Gemini overview: %s. Using heuristic fallback.", str(e))
-        main_topics = list(dict.fromkeys([c.get("section_title", f"Unit {idx+1}") for idx, c in enumerate(chunks[:5])]))
+        main_topics = list(dict.fromkeys([strip_html_tags(c.get("section_title", f"Unit {idx+1}")) for idx, c in enumerate(chunks[:5]) if c.get("section_title")]))
         if not main_topics:
-            main_topics = ["Overview of " + filename]
-        key_concepts = ["Core Concepts in " + filename]
+            main_topics = ["Overview of " + clean_fn]
+        key_concepts = ["Core Concepts in " + clean_fn]
         recommended_order = [f"{i+1}. {t}" for i, t in enumerate(main_topics)]
         exam_points = ["Review key sections covered in document"]
 
     return {
-        "document_title": filename,
-        "subject": subject,
+        "document_title": clean_fn,
+        "subject": clean_sub,
         "total_units": total_units,
         "main_topics": main_topics,
         "key_concepts": key_concepts,
