@@ -6,6 +6,7 @@ manages student progress analytics, learning streaks, and persists data to SQLit
 
 import re
 import json
+import uuid
 import logging
 from datetime import date, datetime
 from typing import List, Dict, Any, Optional, Set, Tuple
@@ -194,7 +195,6 @@ def record_learned_topic(
 
     # Save to Chat Interactions and Topic Performance tables
     if user_question:
-        import uuid
         int_id = f"chat_{uuid.uuid4().hex[:10]}"
         database.save_chat_interaction(
             interaction_id=int_id,
