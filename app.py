@@ -5,6 +5,7 @@ Smart Education Assistant | Smart India Hackathon 2026 (Problem Statement ID 262
 """
 
 import os
+import re
 import datetime
 import secrets
 import time

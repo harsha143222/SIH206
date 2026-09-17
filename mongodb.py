@@ -5,6 +5,7 @@ for users, profiles, documents, chat, quiz results, coins, progress, and group l
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
@@ -137,7 +138,6 @@ def find_user_by_email_or_username(identifier: str) -> Optional[Dict[str, Any]]:
         return None
 
     clean = identifier.strip()
-    import re
     regex_pattern = f"^{re.escape(clean)}$"
     query = {"$or": [{"email": clean.lower()}, {"username": {"$regex": regex_pattern, "$options": "i"}}]}
     try:
