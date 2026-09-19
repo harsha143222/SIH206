@@ -31,21 +31,25 @@ def get_client() -> Optional[Any]:
     global _mongo_client, _db_connected
     if not PYMONGO_AVAILABLE:
         return None
-        
+
+    if _db_connected is False:
+        return None
+
     uri = config.get_mongodb_uri()
     if not uri:
+        _db_connected = False
         return None
 
     if _mongo_client is None:
         try:
-            _mongo_client = MongoClient(uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+            _mongo_client = MongoClient(uri, serverSelectionTimeoutMS=2000, connectTimeoutMS=2000)
             # Test ping
             _mongo_client.admin.command('ping')
             _db_connected = True
             logger.info("Successfully connected to MongoDB Atlas!")
             init_indexes()
         except Exception as e:
-            logger.error("MongoDB Atlas connection failed: %s", str(e))
+            logger.warning("MongoDB Atlas connection unavailable (using Local Storage / SQLite): %s", str(e))
             _db_connected = False
             _mongo_client = None
     return _mongo_client

@@ -132,44 +132,213 @@ class SubjectVectorStore:
         with open(self.meta_path, "w", encoding="utf-8") as f:
             json.dump(self.chunks, f, indent=2)
 
-    def search(self, query_embedding: List[float], top_k: int = config.TOP_K) -> List[Dict[str, Any]]:
-        """Perform semantic search using query vector."""
+def normalize_query(query: str) -> str:
+    """
+    Remove conversational filler phrases ('tell me about', 'explain', 'in pdf', 'from document')
+    to extract core search keywords while preserving technical terms.
+    """
+    if not query or not query.strip():
+        return ""
+
+    q = query.strip()
+    
+    # 1. Strip common conversational prefixes (case-insensitive)
+    prefixes = [
+        r"^\b(tell\s+me\s+about\s+the|tell\s+mee\s+about\s+the|tell\s+me\s+about|tell\s+mee\s+about|tell\s+me|tell\s+mee|explain\s+to\s+me|explain\s+about|explain\s+the|explain|what\s+is\s+a|what\s+is\s+an|what\s+is|what\s+are\s+the|what\s+are|give\s+me\s+an?\s+overview\s+of|give\s+mee\s+an?\s+overview\s+of|give\s+me|give\s+mee|can\s+you\s+explain|can\s+you\s+tell\s+me\s+about|can\s+you\s+tell\s+mee\s+about|describe|show\s+me|show\s+mee)\b\s*",
+    ]
+    
+    # 2. Strip common conversational suffixes (case-insensitive)
+    suffixes = [
+        r"\s*\b(in\s+this\s+pdf|in\s+the\s+pdf|in\s+pdf|from\s+this\s+pdf|from\s+the\s+pdf|from\s+pdf|in\s+this\s+document|in\s+the\s+document|in\s+document|from\s+this\s+document|from\s+the\s+document|from\s+document|uploaded\s+pdf|uploaded\s+document|uploaded\s+material|uploaded\s+notes|in\s+the\s+uploaded\s+material|in\s+the\s+uploaded\s+pdf|in\s+uploaded\s+pdf|pdf|document|notes|material|slides|ppt|pptx|file)\b[\?\.\!\s]*$",
+    ]
+
+    cleaned = q
+    for p in prefixes:
+        cleaned = re.sub(p, "", cleaned, flags=re.IGNORECASE)
+    for s in suffixes:
+        cleaned = re.sub(s, "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = cleaned.strip("? .! \t\n")
+    # If cleaning stripped everything (e.g. user literally asked "tell me about the pdf"), return original query
+    return cleaned if len(cleaned) >= 2 else q.strip("? .!")
+
+
+class SubjectVectorStore:
+    """Vector store for a single subject and user context."""
+
+    def __init__(self, subject: str, user_id: str = "user_default"):
+        self.subject = subject.strip().title()
+        self.user_id = user_id
+        safe_subj = re.sub(r"[^\w\-]", "_", self.subject)
+        safe_user = re.sub(r"[^\w\-]", "_", self.user_id)
+
+        self.store_dir = config.INDEXES_DIR / safe_user / safe_subj
+        self.index_path = self.store_dir / "index.faiss"
+        self.meta_path = self.store_dir / "meta.json"
+        self.emb_path = self.store_dir / "emb.npy"
+
+        self.dimension = 768
+        self.index = None
+        self.chunks: List[Dict[str, Any]] = []
+        self.embeddings_matrix: Optional[np.ndarray] = None
+        self._load()
+
+    def _load(self) -> None:
+        """Load vector store from disk if present."""
+        if self.emb_path.exists() and self.meta_path.exists():
+            try:
+                self.embeddings_matrix = np.load(str(self.emb_path))
+                with open(self.meta_path, "r", encoding="utf-8") as f:
+                    self.chunks = json.load(f)
+                logger.info("Loaded Numpy vector store for subject '%s' (%d chunks)", self.subject, len(self.chunks))
+                return
+            except Exception as e:
+                logger.warning("Error loading Numpy store for subject '%s': %s.", self.subject, str(e))
+
+        if FAISS_AVAILABLE:
+            try:
+                self.index = faiss.IndexFlatIP(self.dimension)
+            except Exception:
+                self.index = None
+        self.chunks = []
+
+    def add_chunks(self, new_chunks: List[Dict[str, Any]], embeddings: List[List[float]]) -> None:
+        """Add chunks and normalized embeddings to the subject vector index."""
+        if not new_chunks or not embeddings:
+            return
+
+        matrix = np.array(embeddings, dtype="float32")
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        matrix = matrix / norms
+
+        if FAISS_AVAILABLE:
+            if self.index is None:
+                self.index = faiss.IndexFlatIP(matrix.shape[1])
+            self.index.add(matrix)
+
+        if self.embeddings_matrix is None:
+            self.embeddings_matrix = matrix
+        else:
+            self.embeddings_matrix = np.vstack([self.embeddings_matrix, matrix])
+
+        self.chunks.extend(new_chunks)
+        self._save()
+
+    def _save(self) -> None:
+        """Persist index and chunk metadata to disk."""
+        self.store_dir.mkdir(parents=True, exist_ok=True)
+        if FAISS_AVAILABLE and self.index is not None:
+            try:
+                faiss.write_index(self.index, str(self.index_path))
+            except Exception as e:
+                logger.warning("Failed to save FAISS index: %s", str(e))
+
+        if self.embeddings_matrix is not None:
+            np.save(str(self.emb_path), self.embeddings_matrix)
+
+        with open(self.meta_path, "w", encoding="utf-8") as f:
+            json.dump(self.chunks, f, indent=2)
+
+    def search(
+        self,
+        query_embedding: List[float],
+        top_k: int = config.TOP_K,
+        doc_id: Optional[str] = None,
+        doc_name: Optional[str] = None,
+        query_text: str = ""
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform HYBRID (Vector + Keyword) search using query vector and text.
+        If doc_id or doc_name is provided, filter results STRICTLY to matching document chunks.
+        """
         if not self.chunks:
             return []
+
+        valid_indices = None
+        if doc_id or doc_name:
+            clean_id = str(doc_id).strip() if doc_id else ""
+            clean_name = str(doc_name).strip().lower() if doc_name else ""
+            clean_stem = Path(clean_name).stem.lower() if ("." in clean_name and len(clean_name) > 3) else clean_name
+
+            matching = []
+            for idx, c in enumerate(self.chunks):
+                c_id = str(c.get("doc_id", ""))
+                c_fn = str(c.get("filename") or c.get("doc_name", "")).lower()
+
+                if (clean_id and c_id == clean_id) or \
+                   (clean_name and (c_fn == clean_name or (clean_stem and len(clean_stem) >= 3 and clean_stem in c_fn))):
+                    matching.append(idx)
+
+            if matching:
+                valid_indices = set(matching)
+            else:
+                logger.info("Vector store filter for doc_id='%s' doc_name='%s' matched 0 chunks.", doc_id, doc_name)
+                return []
 
         q_vec = np.array([query_embedding], dtype="float32")
         norm = np.linalg.norm(q_vec)
         if norm > 0:
             q_vec = q_vec / norm
 
-        # 1. Use FAISS if available and loaded
-        if FAISS_AVAILABLE and self.index is not None and self.index.ntotal > 0:
-            k = min(top_k, self.index.ntotal)
-            distances, indices = self.index.search(q_vec, k)
+        norm_q = normalize_query(query_text).lower() if query_text else ""
+        raw_tokens = [w for w in re.findall(r"\w{2,}", norm_q)]
+        
+        expanded_keywords = set(raw_tokens)
+        for t in raw_tokens:
+            if t.endswith("s") and len(t) > 3:
+                expanded_keywords.add(t[:-1])
+            elif not t.endswith("s"):
+                expanded_keywords.add(t + "s")
 
-            results = []
-            for idx_pos, chunk_idx in enumerate(indices[0]):
-                if 0 <= chunk_idx < len(self.chunks):
-                    chunk = dict(self.chunks[chunk_idx])
-                    chunk["score"] = float(distances[0][idx_pos])
-                    results.append(chunk)
-            return results
+        if "loop" in expanded_keywords or "loops" in expanded_keywords:
+            expanded_keywords.update(["loop", "loops", "for loop", "while loop", "do-while", "do while", "iteration"])
 
-        # 2. Fallback to Numpy Cosine Similarity Matrix Search
+        idx_list = sorted(list(valid_indices)) if valid_indices is not None else list(range(len(self.chunks)))
+        
+        # 1. Vector similarity scores
+        vector_scores = np.zeros(len(idx_list), dtype="float32")
         if self.embeddings_matrix is not None and len(self.embeddings_matrix) > 0:
-            scores = np.dot(self.embeddings_matrix, q_vec.T).flatten()
-            k = min(top_k, len(scores))
-            top_indices = np.argsort(scores)[::-1][:k]
+            sub_matrix = self.embeddings_matrix[idx_list]
+            vector_scores = np.dot(sub_matrix, q_vec.T).flatten()
 
-            results = []
-            for idx in top_indices:
-                if 0 <= idx < len(self.chunks):
-                    chunk = dict(self.chunks[idx])
-                    chunk["score"] = float(scores[idx])
-                    results.append(chunk)
-            return results
+        # 2. Keyword match scores (Term Frequency + Title Boost)
+        keyword_scores = np.zeros(len(idx_list), dtype="float32")
+        for pos, orig_idx in enumerate(idx_list):
+            chunk = self.chunks[orig_idx]
+            chunk_text = chunk.get("text", "").lower()
+            sec_title = str(chunk.get("section_title", "")).lower()
+            kw_score = 0.0
+            
+            # Exact normalized query phrase match
+            if norm_q and norm_q in chunk_text:
+                kw_score += 3.0
 
-        return []
+            # Expanded topic keyword matches (term frequency)
+            for kw in expanded_keywords:
+                cnt = chunk_text.count(kw)
+                if cnt > 0:
+                    kw_score += min(cnt, 5) * 1.0
+                    if kw in sec_title:
+                        kw_score += 2.0
+
+            keyword_scores[pos] = min(kw_score / 5.0, 1.0)
+
+        # 3. Hybrid Combination (0.3 Vector + 0.7 Keyword)
+        hybrid_scores = 0.3 * vector_scores + 0.7 * keyword_scores
+        
+        k = min(top_k, len(hybrid_scores))
+        top_sub_indices = np.argsort(hybrid_scores)[::-1][:k]
+
+        results = []
+        for sub_idx in top_sub_indices:
+            if hybrid_scores[sub_idx] > 0.02:
+                orig_idx = idx_list[sub_idx]
+                chunk = dict(self.chunks[orig_idx])
+                chunk["score"] = float(hybrid_scores[sub_idx])
+                results.append(chunk)
+
+        return results
 
 
 # Cache of loaded vector stores by subject
@@ -247,6 +416,9 @@ def process_uploaded_file(
     overview = generate_material_overview(chunks, filename, subj_norm, len(chunks))
     database.save_material_overview(doc_id, filename, subj_norm, overview)
 
+    total_chars = sum(len(c.get("text", "")) for c in chunks if c.get("status") != "OCR_REQUIRED")
+    doc_status = "READY" if total_chars > 50 else "OCR_REQUIRED"
+
     doc_data = {
         "user_id": str(user_id),
         "doc_id": doc_id,
@@ -256,11 +428,14 @@ def process_uploaded_file(
         "file_size_mb": file_size_mb,
         "file_type": file_ext.upper(),
         "total_units": len(chunks),
+        "extracted_chars": total_chars,
+        "status": doc_status,
         "chunks": chunks,
         "overview": overview
     }
 
     # Save processed JSON and database record
+    config.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     processed_path = config.PROCESSED_DIR / f"{doc_id}.json"
     with open(processed_path, "w", encoding="utf-8") as f:
         json.dump(doc_data, f, indent=2)
@@ -360,12 +535,23 @@ OUTPUT JSON FORMAT:
 
     except Exception as e:
         logger.warning("Failed to generate Gemini overview: %s. Using heuristic fallback.", str(e))
-        main_topics = list(dict.fromkeys([strip_html_tags(c.get("section_title", f"Unit {idx+1}")) for idx, c in enumerate(chunks[:5]) if c.get("section_title")]))
+        content_headings = []
+        for c in chunks:
+            st_title = c.get("section_title", "")
+            if st_title and not st_title.startswith("Page ") and not st_title.startswith("Slide "):
+                content_headings.append(strip_html_tags(st_title))
+            txt = c.get("text", "")
+            lines = [l.strip() for l in txt.split("\n") if l.strip() and 5 <= len(l.strip()) <= 80]
+            for l in lines[:2]:
+                if not any(l.lower().startswith(p) for p in ["page ", "slide ", "http", "www"]):
+                    content_headings.append(strip_html_tags(l))
+        
+        main_topics = list(dict.fromkeys(content_headings))[:5]
         if not main_topics:
-            main_topics = ["Overview of " + clean_fn]
-        key_concepts = ["Core Concepts in " + clean_fn]
+            main_topics = [f"Core Topics in {clean_fn}"]
+        key_concepts = list(dict.fromkeys(content_headings[5:10])) if len(content_headings) > 5 else [f"Key concepts in {clean_fn}"]
         recommended_order = [f"{i+1}. {t}" for i, t in enumerate(main_topics)]
-        exam_points = ["Review key sections covered in document"]
+        exam_points = [f"Study {t} for exams" for t in main_topics[:3]]
 
     return {
         "document_title": clean_fn,
@@ -454,7 +640,7 @@ def process_study_space_file(
 
 
 def _extract_pdf_chunks(file_bytes: bytes, filename: str, subject: str, doc_id: str) -> List[Dict[str, Any]]:
-    """Extract text from PDF using pypdf, preserving page metadata."""
+    """Extract text from PDF using pypdf, preserving page metadata and detecting scanned PDFs."""
     import pypdf
 
     chunks = []
@@ -462,7 +648,10 @@ def _extract_pdf_chunks(file_bytes: bytes, filename: str, subject: str, doc_id: 
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
         for page_idx, page in enumerate(reader.pages):
             page_num = page_idx + 1
-            text = (page.extract_text() or "").strip()
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception:
+                text = ""
             if text:
                 sub_chunks = _split_text_into_chunks(text, max_chars=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP)
                 for sub_idx, sub_text in enumerate(sub_chunks):
@@ -480,8 +669,22 @@ def _extract_pdf_chunks(file_bytes: bytes, filename: str, subject: str, doc_id: 
                         "text": sub_text
                     })
     except Exception as e:
-        logger.error("Error reading PDF %s: %s", filename, str(e))
-        raise DocumentProcessingError(f"Failed to parse PDF file '{filename}': {str(e)}") from e
+        logger.warning("Error reading PDF %s with pypdf: %s. Marking as OCR_REQUIRED.", filename, str(e))
+
+    if not chunks:
+        logger.warning("PDF '%s' extracted 0 text characters using pypdf. Document may be scanned or image-only.", filename)
+        chunks.append({
+            "chunk_id": f"{doc_id}_ocr_required",
+            "doc_id": doc_id,
+            "doc_name": filename,
+            "filename": filename,
+            "unit_label": "Page 1 (Scanned)",
+            "unit_num": 1,
+            "subject": subject,
+            "section_title": "Scanned Document Notice",
+            "text": f"Document '{filename}' appears to be a scanned PDF or image without selectable text. Status: OCR_REQUIRED.",
+            "status": "OCR_REQUIRED"
+        })
 
     return chunks
 
@@ -549,57 +752,254 @@ def search_documents(
     query: str = "",
     subject: str = config.DEFAULT_SUBJECT,
     top_k: int = config.TOP_K,
-    user_id: str = "user_default"
+    user_id: str = "user_default",
+    doc_id: Optional[str] = None,
+    doc_name: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Perform semantic search for query within course materials isolated by subject and user.
-    Returns the top_k matching chunks with full source metadata.
+    Perform semantic search for query within course materials.
+    Searches across active document (if specified), or across all documents in subject,
+    with fallback to all user documents across subjects if no subject match is found.
     """
     if not query or not query.strip():
         return []
 
     subj_norm = subject.strip().title()
+    query_clean = query.strip()
+    query_lower = query_clean.lower()
 
-    # Query subject vector store first
-    v_store = get_subject_vector_store(subj_norm, user_id=user_id)
-    query_embeddings = gemini_client.generate_embeddings([query])
+    target_doc_id = doc_id
+    target_doc_name = doc_name
 
-    if query_embeddings and v_store.chunks:
-        results = v_store.search(query_embeddings[0], top_k=top_k)
-        if results:
-            return results
-
-    # Fallback search over documents passed in memory if vector index is empty
+    # 1. EXPLICIT DOCUMENT NAME REFERENCE MATCHING IN QUERY
     if documents:
+        for d in documents:
+            fn = d.get("filename", "").lower()
+            fn_stem = Path(fn).stem.lower() if ("." in fn and len(fn) > 3) else fn
+            if (len(fn_stem) >= 3 and fn_stem in query_lower) or (fn and fn in query_lower):
+                target_doc_id = d.get("doc_id")
+                target_doc_name = d.get("filename")
+                logger.info("[RAG] Query explicitly referenced document: '%s' (ID: %s)", target_doc_name, target_doc_id)
+                break
+
+    # 2. OVERVIEW / GENERAL DOCUMENT QUERY DETECTION
+    norm_topic = normalize_query(query_clean)
+    norm_lower = norm_topic.lower().strip()
+
+    pure_overview_phrases = [
+        "overview of the pdf", "overview of pdf", "overview of document", "document overview", "pdf overview",
+        "summary of the pdf", "summary of pdf", "summary of document", "document summary", "pdf summary",
+        "what is this pdf about", "what is this document about", "what is this pdf", "what is this document",
+        "explain this pdf", "explain this document", "tell me about this pdf", "tell me about this document",
+        "tell mee about this pdf", "tell mee about pdf", "tell me about pdf", "tell me about document",
+        "tell mee about document", "tell me about the pdf", "tell mee about the pdf", "tell me about the document",
+        "about the pdf", "about the document", "general overview", "overall summary"
+    ]
+
+    is_overview_q = False
+    if norm_lower in ["overview", "summary", "this pdf", "this document", "pdf", "document"] or any(p in query_lower for p in pure_overview_phrases):
+        stop_words = ["pdf", "document", "overview", "summary", "this", "the", "about", "general", "uploaded", "material", "notes", "tell", "me", "mee", "explain", "give", "show", "details", "info", "information"]
+        topic_words = [w for w in re.findall(r"\w+", norm_lower) if w not in stop_words]
+        if not topic_words:
+            is_overview_q = True
+
+    # Resolve target document object ONLY if explicit target document was set
+    target_doc_obj = None
+    if documents and (target_doc_id or target_doc_name):
+        if target_doc_id:
+            target_doc_obj = next((d for d in documents if d.get("doc_id") == target_doc_id), None)
+        if not target_doc_obj and target_doc_name:
+            target_doc_obj = next((d for d in documents if d.get("filename", "").lower() == target_doc_name.lower()), None)
+
+    # 3. IF PURE OVERVIEW QUERY AND A TARGET DOC IS SPECIFIED (OR LATEST DOC FOR OVERVIEW ONLY)
+    if is_overview_q:
+        overview_doc = target_doc_obj or (documents[-1] if documents else None)
+        if overview_doc:
+            rep_chunks = []
+            ov = overview_doc.get("overview")
+            if ov and isinstance(ov, dict):
+                ov_text = (
+                    f"DOCUMENT OVERVIEW & SUMMARY for {overview_doc.get('filename')}:\n"
+                    f"Main Topics: {', '.join(ov.get('main_topics', []))}\n"
+                    f"Key Concepts: {', '.join(ov.get('key_concepts', []))}\n"
+                    f"Recommended Order: {', '.join(ov.get('recommended_order', []))}\n"
+                    f"Exam Focus Points: {', '.join(ov.get('exam_points', []))}"
+                )
+                rep_chunks.append({
+                    "chunk_id": f"{overview_doc.get('doc_id')}_overview",
+                    "doc_id": overview_doc.get("doc_id"),
+                    "doc_name": overview_doc.get("filename"),
+                    "filename": overview_doc.get("filename"),
+                    "unit_label": "Document Overview",
+                    "unit_num": 0,
+                    "subject": subj_norm,
+                    "section_title": "Overview",
+                    "text": ov_text,
+                    "score": 1.0
+                })
+
+            doc_chunks = overview_doc.get("chunks", [])
+            for c in doc_chunks[:6]:
+                rep_chunks.append(dict(c))
+
+            if rep_chunks:
+                logger.info("[RAG] OVERVIEW QUERY MATCH | Target Doc: %s (%s) | Returned %d overview chunks.", overview_doc.get('filename'), overview_doc.get('doc_id'), len(rep_chunks))
+                return rep_chunks[:top_k]
+
+    # 4. HYBRID VECTOR + KEYWORD SEARCH WITH MULTI-TIER FALLBACK
+    search_term = norm_topic if norm_topic else query_clean
+    query_embeddings = gemini_client.generate_embeddings([search_term])
+    emb_vector = query_embeddings[0] if query_embeddings else [0.0]*768
+
+    results = []
+
+    # TIER A: Primary subject vector store search
+    v_store = get_subject_vector_store(subj_norm, user_id=user_id)
+    if v_store.chunks:
+        results = v_store.search(
+            query_embedding=emb_vector,
+            top_k=top_k,
+            doc_id=target_doc_id,
+            doc_name=target_doc_name,
+            query_text=search_term
+        )
+
+    # TIER B: If no results in current subject and no explicit document filter was specified,
+    # search across all other subject vector stores for this user
+    if not results and not target_doc_id and not target_doc_name:
+        safe_user = re.sub(r"[^\w\-]", "_", str(user_id))
+        user_idx_base = config.INDEXES_DIR / safe_user
+        if user_idx_base.exists():
+            for subj_dir in user_idx_base.iterdir():
+                if subj_dir.is_dir() and subj_dir.name != re.sub(r"[^\w\-]", "_", subj_norm):
+                    other_subj = subj_dir.name.replace("_", " ")
+                    other_vstore = get_subject_vector_store(other_subj, user_id=user_id)
+                    if other_vstore.chunks:
+                        res = other_vstore.search(
+                            query_embedding=emb_vector,
+                            top_k=top_k,
+                            query_text=search_term
+                        )
+                        results.extend(res)
+
+            if results:
+                unique_res = {}
+                for c in results:
+                    cid = c.get("chunk_id") or f"{c.get('doc_id')}_{c.get('unit_num')}"
+                    if cid not in unique_res or c.get("score", 0.0) > unique_res[cid].get("score", 0.0):
+                        unique_res[cid] = c
+                results = sorted(unique_res.values(), key=lambda x: x.get("score", 0.0), reverse=True)[:top_k]
+
+    # TIER C: IN-MEMORY HYBRID FALLBACK FILTERED BY TARGET DOCUMENT OR ALL DOCUMENTS
+    if not results and documents:
         in_mem_chunks = []
-        for doc in documents:
-            if doc.get("subject", subj_norm) == subj_norm:
-                for c in doc.get("chunks", []):
-                    in_mem_chunks.append(c)
+        for d in documents:
+            if target_doc_id and d.get("doc_id") != target_doc_id:
+                continue
+            if not target_doc_id and target_doc_name and d.get("filename", "").lower() != target_doc_name.lower():
+                continue
+            for c in d.get("chunks", []):
+                in_mem_chunks.append(c)
 
         if in_mem_chunks:
-            # Keyword / scoring fallback
-            words = set(re.findall(r"\w{3,}", query.lower()))
+            search_lower = search_term.lower()
+            keywords = [w for w in re.findall(r"\w{2,}", search_lower)]
             scored = []
             for c in in_mem_chunks:
                 c_text = c.get("text", "").lower()
-                matches = sum(1 for w in words if w in c_text)
-                if matches > 0:
-                    scored.append((matches, c))
+                kw_score = 0.0
+                if search_lower in c_text:
+                    kw_score += 2.0
+                for kw in keywords:
+                    if kw in c_text:
+                        kw_score += 0.5
+                scored.append((kw_score, c))
             scored.sort(key=lambda x: x[0], reverse=True)
-            return [c for _, c in scored[:top_k]]
+            results = [c for score, c in scored[:top_k] if score > 0.1]
 
-    return []
+    # DIAGNOSTIC LOGGING METRICS
+    retrieved_ids = list(dict.fromkeys(c.get("doc_id") for c in results))
+    scores = [round(c.get("score", 0.0), 3) for c in results[:3]]
+    sources = [f"{c.get('filename', 'Doc')} — {c.get('unit_label', 'Page 1')}" for c in results[:3]]
+
+    logger.info(
+        "[RAG] Search Execution:\n"
+        "  Query: %s\n"
+        "  Selected document: %s\n"
+        "  Selected subject: %s\n"
+        "  Candidate documents: %s\n"
+        "  Retrieved chunks count: %d\n"
+        "  Retrieved document IDs: %s\n"
+        "  Top similarity scores: %s\n"
+        "  Source pages: %s",
+        query_clean,
+        target_doc_name or (target_doc_id if target_doc_id else "ALL_DOCUMENTS"),
+        subj_norm,
+        [d.get("filename") for d in (documents or [])],
+        len(results),
+        retrieved_ids,
+        scores,
+        sources
+    )
+
+    return results
 
 
-def format_context_for_prompt(chunks: List[Dict[str, Any]]) -> str:
-    """Format matching document chunks into clean grounded context for LLM prompts."""
+def get_document_diagnostics(doc_id: str, user_id: str = "user_default") -> Dict[str, Any]:
+    """
+    Diagnostic helper to report document extraction and vector indexing status.
+    """
+    processed_path = config.PROCESSED_DIR / f"{doc_id}.json"
+    if not processed_path.exists():
+        return {"doc_id": doc_id, "status": "NOT_FOUND"}
+
+    with open(processed_path, "r", encoding="utf-8") as f:
+        doc_data = json.load(f)
+
+    subject = doc_data.get("subject", config.DEFAULT_SUBJECT)
+    v_store = get_subject_vector_store(subject, user_id=user_id)
+    matching_vectors = [c for c in v_store.chunks if c.get("doc_id") == doc_id]
+
+    extracted_chars = doc_data.get("extracted_chars", sum(len(c.get("text", "")) for c in doc_data.get("chunks", [])))
+    doc_status = doc_data.get("status", "READY" if extracted_chars > 50 else "OCR_REQUIRED")
+
+    return {
+        "doc_id": doc_id,
+        "filename": doc_data.get("filename"),
+        "subject": subject,
+        "extracted_chars": extracted_chars,
+        "total_units": doc_data.get("total_units", len(doc_data.get("chunks", []))),
+        "chunks": len(doc_data.get("chunks", [])),
+        "index_vectors": len(matching_vectors),
+        "status": doc_status
+    }
+
+
+def format_context_for_prompt(
+    chunks: List[Dict[str, Any]],
+    active_doc_name: Optional[str] = None,
+    active_doc_id: Optional[str] = None
+) -> str:
+    """
+    Format matching document chunks into clean grounded context for LLM prompts.
+    Includes explicit ACTIVE DOCUMENT header & strict grounding policy.
+    """
     if not chunks:
         return ""
 
-    context_parts = []
+    doc_name = active_doc_name or chunks[0].get("filename") or "Course Material"
+    doc_id = active_doc_id or chunks[0].get("doc_id") or "doc_active"
+
+    header_parts = [
+        f"CURRENT ACTIVE DOCUMENT: {doc_name}",
+        f"DOCUMENT ID: {doc_id}",
+        "STRICT GROUNDING RULE: Answer using ONLY the current active document context below. Do NOT use information from a previous or different document.",
+        ""
+    ]
+
+    context_parts = ["\n".join(header_parts)]
     for idx, chunk in enumerate(chunks, 1):
-        filename = chunk.get("doc_name") or chunk.get("filename", "Course Material")
+        filename = chunk.get("doc_name") or chunk.get("filename", doc_name)
         unit_label = chunk.get("unit_label", "Page 1")
         source_ref = f"{filename} — {unit_label}"
         context_parts.append(

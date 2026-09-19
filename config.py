@@ -22,7 +22,12 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 PROCESSED_DIR = DATA_DIR / "processed"
 INDEXES_DIR = DATA_DIR / "indexes"
 DB_DIR = DATA_DIR / "database"
+CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DB_DIR / "edumind.db"
+
+# Ensure all data subdirectories exist automatically across Windows/Linux/Streamlit Cloud
+for _dir_path in [DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, INDEXES_DIR, DB_DIR, CACHE_DIR]:
+    _dir_path.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SUBJECT = "General Computer Science"
 
@@ -74,7 +79,7 @@ MONGODB_DATABASE = get_mongodb_database()
 # ==============================================================================
 def get_gemini_model() -> str:
     """
-    Retrieve GEMINI_MODEL from environment variables or Streamlit secrets,
+    Retrieve primary GEMINI_MODEL from environment variables or Streamlit secrets,
     defaulting to gemini-3.5-flash.
     """
     model = os.getenv("GEMINI_MODEL", "").strip()
@@ -87,10 +92,29 @@ def get_gemini_model() -> str:
             pass
     return model if model else "gemini-3.5-flash"
 
-GEMINI_MODEL = get_gemini_model()
+def get_gemini_fallback_model() -> str:
+    """
+    Retrieve GEMINI_FALLBACK_MODEL from environment variables or Streamlit secrets,
+    defaulting to gemini-3.5-flash-lite.
+    """
+    model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+    if not model or model == "your_fallback_model_here":
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "GEMINI_FALLBACK_MODEL" in st.secrets:
+                model = str(st.secrets["GEMINI_FALLBACK_MODEL"]).strip()
+        except Exception:
+            pass
+    return model if model else "gemini-3.5-flash-lite"
+
+PRIMARY_MODEL = get_gemini_model()
+FALLBACK_MODEL = get_gemini_fallback_model()
+GEMINI_MODEL = PRIMARY_MODEL
 EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004").strip()
 
-GEMINI_MODEL_FALLBACKS = []
+GEMINI_MODEL_FALLBACKS = [FALLBACK_MODEL]
+if "gemini-1.5-flash" not in GEMINI_MODEL_FALLBACKS:
+    GEMINI_MODEL_FALLBACKS.append("gemini-1.5-flash")
 
 GENERATION_CONFIG = {
     "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.7")),

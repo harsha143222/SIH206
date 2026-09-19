@@ -2,14 +2,15 @@
 EduMind AI - Centralized Gemini API Client Module
 Uses official Google GenAI Python SDK (google-genai).
 Handles authentication, streaming responses, structured JSON quiz generation,
-multimodal vision analysis, embedding generation, and quota/error management.
+multimodal vision analysis, embedding generation, exponential backoff retries (503),
+and seamless fallback model routing.
 """
 
 import json
 import logging
 import io
 import time
-from typing import List, Dict, Any, Generator, Optional
+from typing import List, Dict, Any, Generator, Optional, Tuple
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -60,19 +61,79 @@ def _get_client() -> genai.Client:
 
 
 def _get_candidate_models(model_override: Optional[str] = None) -> List[str]:
-    """Return ordered list of supported Gemini models to attempt."""
+    """
+    Return ordered list of supported Gemini models to attempt.
+    Primary model: config.PRIMARY_MODEL (gemini-3.5-flash)
+    Fallback model: config.FALLBACK_MODEL (gemini-3.5-flash-lite)
+    """
     models = []
     if model_override and model_override.strip():
         models.append(model_override.strip())
-    
-    current_model = config.get_gemini_model()
-    if current_model not in models:
-        models.append(current_model)
 
-    for fb in config.GEMINI_MODEL_FALLBACKS:
+    primary = getattr(config, "PRIMARY_MODEL", config.get_gemini_model())
+    if primary not in models:
+        models.append(primary)
+
+    fallback = getattr(config, "FALLBACK_MODEL", config.get_gemini_fallback_model())
+    if fallback not in models:
+        models.append(fallback)
+
+    for fb in getattr(config, "GEMINI_MODEL_FALLBACKS", []):
         if fb not in models:
             models.append(fb)
+
     return models
+
+
+def _classify_error(e: Exception) -> Tuple[str, bool]:
+    """
+    Classify Gemini exception into error category and return (category_name, is_retryable_on_same_model).
+    """
+    err_str = str(e)
+    err_lower = err_str.lower()
+
+    # 1. 503 UNAVAILABLE / TEMPORARY BUSY
+    if any(k in err_str or k in err_lower for k in [
+        "503", "unavailable", "high demand", "spikes in demand", "temporarily busy",
+        "service unavailable", "overloaded", "deadline exceeded"
+    ]):
+        return ("503_UNAVAILABLE", True)
+
+    # 2. 429 RESOURCE EXHAUSTED / RATE LIMIT
+    if any(k in err_str or k in err_lower for k in [
+        "429", "resource_exhausted", "quota", "rate limit"
+    ]):
+        return ("429_QUOTA", True)
+
+    # 3. 404 NOT FOUND
+    if any(k in err_str or k in err_lower for k in [
+        "404", "not_found", "not found"
+    ]):
+        return ("NOT_FOUND", False)
+
+    # 4. AUTHENTICATION / PERMISSION (401 / 403)
+    if any(k in err_str or k in err_lower for k in [
+        "401", "403", "unauthenticated", "permission_denied", "api_key_invalid", "invalid api key"
+    ]):
+        return ("AUTH", False)
+
+    # 5. 400 INVALID ARGUMENT
+    if any(k in err_str or k in err_lower for k in [
+        "400", "invalid_argument"
+    ]):
+        return ("INVALID_ARG", False)
+
+    # 6. OTHER 5XX SERVER ERRORS
+    if any(k in err_str or k in err_lower for k in [
+        "500", "502", "504", "internal"
+    ]):
+        return ("5XX_SERVER", True)
+
+    return ("UNKNOWN_ERROR", False)
+
+
+# Exponential backoff sequence: Attempt 1 (0s), Attempt 2 (2s), Attempt 3 (4s), Attempt 4 (8s), Attempt 5 (16s)
+RETRY_DELAYS = [0, 2, 4, 8, 16]
 
 
 def generate_chat_response_stream(
@@ -83,6 +144,8 @@ def generate_chat_response_stream(
 ) -> Generator[str, None, None]:
     """
     Generate a streaming chat response using official google-genai SDK.
+    Handles 503 UNAVAILABLE with exponential backoff retries and fallback model switching.
+    PRESERVES FULL PDF CONTEXT, SYSTEM INSTRUCTION, AND CONVERSATION CONTEXT ACROSS FALLBACKS.
     """
     client = _get_client()
     candidate_models = _get_candidate_models(model_name)
@@ -113,40 +176,58 @@ def generate_chat_response_stream(
     )
 
     last_err = None
-    for model_id in candidate_models:
-        try:
-            response = client.models.generate_content_stream(
-                model=model_id,
-                contents=full_prompt,
-                config=gen_config
-            )
-            has_yielded = False
-            for chunk in response:
-                if chunk.text:
-                    has_yielded = True
-                    yield chunk.text
-            if has_yielded:
-                return
-        except Exception as e:
-            err_str = str(e)
-            logger.warning("Gemini model %s failed: %s", model_id, err_str)
-            last_err = e
-            if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
-                time.sleep(1)
-                continue
-            if "NotFound" in err_str or "404" in err_str or "not found" in err_str:
-                continue
-            break
+    for model_idx, model_id in enumerate(candidate_models):
+        is_fallback = (model_idx > 0)
+        if is_fallback:
+            logger.info("Gemini primary model returned 503/error. Switching to fallback model '%s' (preserving full PDF context & student question)...", model_id)
+
+        for attempt_idx, delay in enumerate(RETRY_DELAYS):
+            attempt_num = attempt_idx + 1
+            max_attempts = len(RETRY_DELAYS)
+
+            if delay > 0:
+                logger.info("Gemini model '%s' returned 503/transient error. Retry attempt %d/%d (delay: %ds)...", model_id, attempt_num, max_attempts, delay)
+                time.sleep(delay)
+
+            try:
+                response = client.models.generate_content_stream(
+                    model=model_id,
+                    contents=full_prompt,
+                    config=gen_config
+                )
+                has_yielded = False
+                for chunk in response:
+                    if chunk.text:
+                        has_yielded = True
+                        yield chunk.text
+                if has_yielded:
+                    if is_fallback:
+                        logger.info("Fallback model '%s' successfully generated grounded response!", model_id)
+                    return
+            except Exception as e:
+                err_str = str(e)
+                err_type, is_retryable = _classify_error(e)
+                logger.warning("Gemini model '%s' attempt %d/%d failed [%s]: %s", model_id, attempt_num, max_attempts, err_type, err_str)
+                last_err = e
+
+                if err_type == "AUTH":
+                    raise AuthenticationError("⚠️ Gemini API Key is invalid or expired. Please check your API key.")
+                elif err_type in ["NOT_FOUND", "INVALID_ARG"]:
+                    break
+
+                if not is_retryable:
+                    break
 
     if last_err:
-        err_msg = str(last_err)
-        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-            raise RateLimitError("⚠️ Gemini API quota limit reached. Please wait a moment before asking another question.")
-        elif "API_KEY_INVALID" in err_msg or "401" in err_msg or "UNAUTHENTICATED" in err_msg:
-            raise AuthenticationError("⚠️ Gemini API Key is invalid or expired. Please update your environment variables or secrets.")
+        err_type, _ = _classify_error(last_err)
+        if err_type in ["503_UNAVAILABLE", "5XX_SERVER"]:
+            raise ServiceUnavailableError("Gemini is temporarily busy. Please try again in a moment.")
+        elif err_type == "429_QUOTA":
+            raise RateLimitError("Gemini API quota limit reached. Please wait a moment before trying again.")
         else:
-            raise GeminiClientError(f"Gemini API Error ({candidate_models[0]}): {err_msg}")
-    raise GeminiClientError("Failed to generate response from Gemini API.")
+            raise GeminiClientError(f"Gemini is temporarily busy. Please try again in a moment.")
+
+    yield "Gemini is temporarily busy. Please try again in a moment."
 
 
 def generate_json_response(
@@ -154,7 +235,10 @@ def generate_json_response(
     system_instruction: Optional[str] = None,
     model_name: Optional[str] = None
 ) -> Any:
-    """Generate structured JSON output using google-genai SDK."""
+    """
+    Generate structured JSON output using google-genai SDK.
+    Includes 503 exponential backoff retries and fallback model switching.
+    """
     client = _get_client()
     candidate_models = _get_candidate_models(model_name)
 
@@ -167,37 +251,59 @@ def generate_json_response(
     )
 
     last_err = None
-    for model_id in candidate_models:
-        try:
-            resp = client.models.generate_content(
-                model=model_id,
-                contents=prompt,
-                config=gen_config
-            )
-            text = (resp.text or "").strip()
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-            if text:
-                return json.loads(text)
-        except Exception as e:
-            err_str = str(e)
-            logger.warning("Gemini JSON generation failed on %s: %s", model_id, err_str)
-            last_err = e
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                time.sleep(1)
-                continue
+    for model_idx, model_id in enumerate(candidate_models):
+        is_fallback = (model_idx > 0)
+        if is_fallback:
+            logger.info("Switching to fallback model '%s' for JSON generation...", model_id)
+
+        for attempt_idx, delay in enumerate(RETRY_DELAYS):
+            attempt_num = attempt_idx + 1
+            max_attempts = len(RETRY_DELAYS)
+
+            if delay > 0:
+                logger.info("Gemini JSON model '%s' returned 503/transient error. Retry attempt %d/%d (delay: %ds)...", model_id, attempt_num, max_attempts, delay)
+                time.sleep(delay)
+
+            try:
+                resp = client.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                    config=gen_config
+                )
+                text = (resp.text or "").strip()
+                if text.startswith("```json"):
+                    text = text[7:]
+                if text.startswith("```"):
+                    text = text[3:]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
+                if text:
+                    return json.loads(text)
+            except Exception as e:
+                err_str = str(e)
+                err_type, is_retryable = _classify_error(e)
+                logger.warning("Gemini JSON model '%s' attempt %d/%d failed [%s]: %s", model_id, attempt_num, max_attempts, err_type, err_str)
+                last_err = e
+
+                if err_type == "AUTH":
+                    raise AuthenticationError("⚠️ Gemini API Key is invalid or expired. Please check your API key.")
+                elif err_type in ["NOT_FOUND", "INVALID_ARG"]:
+                    break
+
+                if not is_retryable:
+                    break
 
     if last_err:
-        err_msg = str(last_err)
-        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-            raise RateLimitError("⚠️ Gemini API quota limit reached. Please retry in a moment.")
-        raise GeminiClientError(f"Gemini API Error ({candidate_models[0]}): {err_msg}")
-    raise GeminiClientError("Failed to generate JSON response from Gemini API.")
+        err_type, _ = _classify_error(last_err)
+        if err_type in ["503_UNAVAILABLE", "5XX_SERVER"]:
+            raise ServiceUnavailableError("Gemini is temporarily busy. Please try again in a moment.")
+        elif err_type == "429_QUOTA":
+            raise RateLimitError("Gemini API quota limit reached. Please wait a moment and try again.")
+        else:
+            raise GeminiClientError("Gemini is temporarily busy. Please try again in a moment.")
+
+    raise GeminiClientError("Gemini is temporarily busy. Please try again in a moment.")
 
 
 def generate_response(
@@ -205,7 +311,10 @@ def generate_response(
     system_instruction: Optional[str] = None,
     model_name: Optional[str] = None
 ) -> str:
-    """Generate a synchronous text response using google-genai SDK."""
+    """
+    Generate a synchronous text response using google-genai SDK.
+    Includes 503 exponential backoff retries and fallback model switching.
+    """
     client = _get_client()
     candidate_models = _get_candidate_models(model_name)
 
@@ -217,23 +326,51 @@ def generate_response(
     )
 
     last_err = None
-    for model_id in candidate_models:
-        try:
-            resp = client.models.generate_content(
-                model=model_id,
-                contents=prompt,
-                config=gen_config
-            )
-            if resp.text:
-                return resp.text.strip()
-        except Exception as e:
-            err_str = str(e)
-            logger.warning("Gemini sync response failed on %s: %s", model_id, err_str)
-            last_err = e
+    for model_idx, model_id in enumerate(candidate_models):
+        is_fallback = (model_idx > 0)
+        if is_fallback:
+            logger.info("Switching to fallback model '%s' for sync response...", model_id)
+
+        for attempt_idx, delay in enumerate(RETRY_DELAYS):
+            attempt_num = attempt_idx + 1
+            max_attempts = len(RETRY_DELAYS)
+
+            if delay > 0:
+                logger.info("Gemini sync model '%s' returned 503/transient error. Retry attempt %d/%d (delay: %ds)...", model_id, attempt_num, max_attempts, delay)
+                time.sleep(delay)
+
+            try:
+                resp = client.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                    config=gen_config
+                )
+                if resp.text:
+                    return resp.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                err_type, is_retryable = _classify_error(e)
+                logger.warning("Gemini sync model '%s' attempt %d/%d failed [%s]: %s", model_id, attempt_num, max_attempts, err_type, err_str)
+                last_err = e
+
+                if err_type == "AUTH":
+                    raise AuthenticationError("⚠️ Gemini API Key is invalid or expired. Please check your API key.")
+                elif err_type in ["NOT_FOUND", "INVALID_ARG"]:
+                    break
+
+                if not is_retryable:
+                    break
 
     if last_err:
-        raise GeminiClientError(f"Gemini API Error: {str(last_err)}")
-    return "No response generated from Gemini API."
+        err_type, _ = _classify_error(last_err)
+        if err_type in ["503_UNAVAILABLE", "5XX_SERVER"]:
+            raise ServiceUnavailableError("Gemini is temporarily busy. Please try again in a moment.")
+        elif err_type == "429_QUOTA":
+            raise RateLimitError("Gemini API quota limit reached. Please wait a moment and try again.")
+        else:
+            raise GeminiClientError("Gemini is temporarily busy. Please try again in a moment.")
+
+    return "Gemini is temporarily busy. Please try again in a moment."
 
 
 def analyze_image_doubt(
@@ -243,7 +380,7 @@ def analyze_image_doubt(
 ) -> str:
     """
     Multimodal image question answering using google-genai SDK.
-    Reads textbook questions, handwritten notes, code screenshots, or diagrams.
+    Includes 503 exponential backoff retries and fallback model switching.
     """
     client = _get_client()
     candidate_models = _get_candidate_models()
@@ -272,60 +409,91 @@ def analyze_image_doubt(
     )
 
     last_err = None
-    for model_id in candidate_models:
-        try:
-            resp = client.models.generate_content(
-                model=model_id,
-                contents=[prompt, pil_img]
-            )
-            if resp.text:
-                return resp.text.strip()
-        except Exception as e:
-            err_str = str(e)
-            logger.warning("Gemini Vision failed on %s: %s", model_id, err_str)
-            last_err = e
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                time.sleep(1)
-                continue
+    for model_idx, model_id in enumerate(candidate_models):
+        is_fallback = (model_idx > 0)
+        if is_fallback:
+            logger.info("Switching to fallback model '%s' for Vision doubt...", model_id)
+
+        for attempt_idx, delay in enumerate(RETRY_DELAYS):
+            attempt_num = attempt_idx + 1
+            max_attempts = len(RETRY_DELAYS)
+
+            if delay > 0:
+                logger.info("Gemini Vision model '%s' returned 503/transient error. Retry attempt %d/%d (delay: %ds)...", model_id, attempt_num, max_attempts, delay)
+                time.sleep(delay)
+
+            try:
+                resp = client.models.generate_content(
+                    model=model_id,
+                    contents=[prompt, pil_img]
+                )
+                if resp.text:
+                    return resp.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                err_type, is_retryable = _classify_error(e)
+                logger.warning("Gemini Vision model '%s' attempt %d/%d failed [%s]: %s", model_id, attempt_num, max_attempts, err_type, err_str)
+                last_err = e
+
+                if err_type == "AUTH":
+                    raise AuthenticationError("⚠️ Gemini API Key is invalid or expired. Please check your API key.")
+                elif err_type in ["NOT_FOUND", "INVALID_ARG"]:
+                    break
+
+                if not is_retryable:
+                    break
 
     if last_err:
-        err_msg = str(last_err)
-        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+        err_type, _ = _classify_error(last_err)
+        if err_type in ["503_UNAVAILABLE", "5XX_SERVER"]:
+            return "⚠️ Gemini is temporarily busy. Please try again in a moment."
+        elif err_type == "429_QUOTA":
             return "⚠️ Gemini API quota limit reached. Please wait a minute and try submitting your image again."
-        return f"⚠️ Error processing image with Gemini: {err_msg}"
 
     return "I can't clearly read the question in this image. Please upload a clearer image."
 
 
 def generate_embeddings(texts: List[str]) -> List[List[float]]:
     """
-    Generate vector embeddings using Gemini's text-embedding-004 model via google-genai SDK.
-    Includes robust fallback to local feature vectors if embedding API fails.
+    Generate vector embeddings using Gemini's embedding models via google-genai SDK.
+    Includes robust fallback to deterministic hash feature vectors if embedding API fails.
     """
     if not texts:
         return []
 
+    candidate_models = [config.EMBEDDING_MODEL, "text-embedding-004", "models/text-embedding-004", "embedding-001"]
+    # De-duplicate candidate models preserving order
+    models_to_try = []
+    for m in candidate_models:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
+
     try:
         client = _get_client()
-        response = client.models.embed_content(
-            model=config.EMBEDDING_MODEL,
-            contents=texts
-        )
+        for model_id in models_to_try:
+            try:
+                response = client.models.embed_content(
+                    model=model_id,
+                    contents=texts
+                )
 
-        embeddings = []
-        if hasattr(response, "embeddings") and response.embeddings:
-            for emb in response.embeddings:
-                if hasattr(emb, "values"):
-                    embeddings.append(list(emb.values))
-                elif isinstance(emb, dict) and "values" in emb:
-                    embeddings.append(list(emb["values"]))
-        elif hasattr(response, "embedding"):
-            embeddings.append(list(response.embedding.values))
+                embeddings = []
+                if hasattr(response, "embeddings") and response.embeddings:
+                    for emb in response.embeddings:
+                        if hasattr(emb, "values"):
+                            embeddings.append(list(emb.values))
+                        elif isinstance(emb, dict) and "values" in emb:
+                            embeddings.append(list(emb["values"]))
+                elif hasattr(response, "embedding"):
+                    embeddings.append(list(response.embedding.values))
 
-        if len(embeddings) == len(texts):
-            return embeddings
+                if len(embeddings) == len(texts):
+                    return embeddings
+            except Exception as inner_e:
+                logger.warning("Embedding attempt with model '%s' failed: %s", model_id, str(inner_e))
+                continue
     except Exception as e:
-        logger.warning("Gemini embedding API call failed, using local feature vector fallback: %s", str(e))
+        logger.warning("Gemini embedding client initialization failed, using local feature vector fallback: %s", str(e))
 
     return [_fallback_hash_embedding(t) for t in texts]
 

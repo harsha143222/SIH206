@@ -6,6 +6,8 @@ and Feature 2 (Shared Study Space, RAG isolation, Chat, Group Quiz, Security).
 
 import secrets
 import uuid
+import json
+import config
 import database
 import document_processor
 import quiz_engine
@@ -237,8 +239,134 @@ def run_tests():
     assert is_mem_non is False, "Non-member wrongly marked as member"
     print("TEST 23 PASSED: Non-member denied access to Study Space.")
 
-    print("\nALL 23 VERIFICATION TESTS PASSED SUCCESSFULLY!")
+    # --- Testing Feature 3: RAG Multi-PDF, Subject Isolation & Scanned PDF Fallbacks ---
+    print("\n--- Testing Feature 3: RAG Multi-PDF, Subject Isolation & Scanned PDF Fallbacks ---")
+    
+    # TEST 24: Multiple PDF Upload and Cross-Document Retrieval (PDF 1 queried when PDF 2 is latest)
+    doc_1_id = f"doc_pdf1_{run_suffix}"
+    doc_2_id = f"doc_pdf2_{run_suffix}"
+    
+    chunks_pdf1 = [{
+        "chunk_id": f"{doc_1_id}_p1_0",
+        "doc_id": doc_1_id,
+        "doc_name": "Java_Advanced_Pointers.pdf",
+        "filename": "Java_Advanced_Pointers.pdf",
+        "unit_label": "Page 1",
+        "unit_num": 1,
+        "subject": "Java",
+        "section_title": "Page 1",
+        "text": "Inheritance allows a child class to acquire properties and methods of a parent class in object-oriented programming."
+    }]
+    
+    chunks_pdf2 = [{
+        "chunk_id": f"{doc_2_id}_p1_0",
+        "doc_id": doc_2_id,
+        "doc_name": "Java_Streams_And_Lambdas.pdf",
+        "filename": "Java_Streams_And_Lambdas.pdf",
+        "unit_label": "Page 1",
+        "unit_num": 1,
+        "subject": "Java",
+        "section_title": "Page 1",
+        "text": "Stream API enables functional programming operations such as map, filter, and reduce on collections."
+    }]
+
+    # Save vector store chunks for Java
+    v_store_java = document_processor.get_subject_vector_store("Java", user_id=user_a_id)
+    v_store_java.add_chunks(chunks_pdf1, [[0.1] * 768])
+    v_store_java.add_chunks(chunks_pdf2, [[0.2] * 768])
+
+    docs_list = [
+        {"doc_id": doc_1_id, "filename": "Java_Advanced_Pointers.pdf", "chunks": chunks_pdf1},
+        {"doc_id": doc_2_id, "filename": "Java_Streams_And_Lambdas.pdf", "chunks": chunks_pdf2}
+    ]
+
+    # Query question from PDF 1 (Inheritance) when no doc_id is selected
+    res_multi = document_processor.search_documents(
+        documents=docs_list,
+        query="What is inheritance?",
+        subject="Java",
+        user_id=user_a_id,
+        doc_id=None
+    )
+    assert len(res_multi) > 0 and res_multi[0]["doc_id"] == doc_1_id, "Multi-PDF retrieval failed to find answer in earlier PDF 1"
+    print("TEST 24 PASSED: Found answer in earlier uploaded PDF 1 when no specific document was selected.")
+
+    # TEST 25: Explicit Document Selection Filtering
+    res_explicit = document_processor.search_documents(
+        documents=docs_list,
+        query="What is inheritance?",
+        subject="Java",
+        user_id=user_a_id,
+        doc_id=doc_2_id  # explicitly select PDF 2
+    )
+    # Since query is about inheritance and PDF 2 is selected, no matching chunks in PDF 2 for inheritance
+    assert not any(c["doc_id"] == doc_1_id for c in res_explicit), "Explicit filter failed: retrieved PDF 1 chunks when PDF 2 was explicitly selected"
+    print("TEST 25 PASSED: Explicit document filter strictly enforced for selected PDF.")
+
+    # TEST 26: Cross-Subject Retrieval Fallback
+    res_cross = document_processor.search_documents(
+        documents=docs_list,
+        query="inheritance",
+        subject="General",  # different active subject in UI
+        user_id=user_a_id,
+        doc_id=None
+    )
+    assert len(res_cross) > 0 and res_cross[0]["doc_id"] == doc_1_id, "Cross-subject fallback retrieval failed"
+    print("TEST 26 PASSED: Cross-subject fallback retrieved relevant PDF chunks across subject stores.")
+
+    # TEST 27: Document Diagnostics Helper
+    processed_file = config.PROCESSED_DIR / f"{doc_1_id}.json"
+    with open(processed_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "doc_id": doc_1_id,
+            "filename": "Java_Advanced_Pointers.pdf",
+            "subject": "Java",
+            "total_units": 1,
+            "extracted_chars": 120,
+            "status": "READY",
+            "chunks": chunks_pdf1
+        }, f)
+    
+    diag = document_processor.get_document_diagnostics(doc_1_id, user_id=user_a_id)
+    assert diag["status"] == "READY" and diag["chunks"] == 1, "Diagnostics helper failed"
+    print("TEST 27 PASSED: Document diagnostics helper verified READY status.")
+
+    # TEST 28: Scanned PDF / OCR Required Detection
+    scanned_chunks = document_processor._extract_pdf_chunks(b"%PDF-dummy-scanned", "scanned_doc.pdf", "Java", f"doc_scan_{run_suffix}")
+    assert len(scanned_chunks) == 1 and scanned_chunks[0].get("status") == "OCR_REQUIRED", "Scanned PDF detection failed"
+    print("TEST 28 PASSED: Scanned image PDF detected and marked as OCR_REQUIRED.")
+
+    # TEST 29: Specific User Query 'tell me about python pdf' Semantic Retrieval
+    doc_py_id = f"doc_py_{run_suffix}"
+    chunks_py = [{
+        "chunk_id": f"{doc_py_id}_p1_0",
+        "doc_id": doc_py_id,
+        "doc_name": "Python_Course_Unit1.pdf",
+        "filename": "Python_Course_Unit1.pdf",
+        "unit_label": "Page 1",
+        "unit_num": 1,
+        "subject": "Python",
+        "section_title": "Python Overview",
+        "text": "Python is an interpreted high-level general-purpose programming language emphasizing code readability."
+    }]
+    v_store_py = document_processor.get_subject_vector_store("Python", user_id=user_a_id)
+    v_store_py.add_chunks(chunks_py, [[0.15] * 768])
+
+    docs_py = [{"doc_id": doc_py_id, "filename": "Python_Course_Unit1.pdf", "chunks": chunks_py}]
+
+    res_py = document_processor.search_documents(
+        documents=docs_py,
+        query="tell me about python pdf",
+        subject="Python",
+        user_id=user_a_id,
+        doc_id=None
+    )
+    assert len(res_py) > 0 and res_py[0]["doc_id"] == doc_py_id, "Failed to retrieve Python chunks for 'tell me about python pdf'"
+    print("TEST 29 PASSED: 'tell me about python pdf' successfully retrieved Python PDF chunks via semantic RAG.")
+
+    print("\nALL 29 VERIFICATION TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":
     run_tests()
+

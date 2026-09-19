@@ -10,6 +10,7 @@ import datetime
 import secrets
 import time
 import uuid
+from typing import Any, Dict, List
 import streamlit as st
 import config
 import database
@@ -584,6 +585,9 @@ def initialize_session_state():
     sample_groups = group_learning.create_sample_groups(user_name)
     first_group_id = list(sample_groups.keys())[0] if sample_groups else ""
 
+    active_doc_id = user_docs[-1]["doc_id"] if (user_docs and isinstance(user_docs[-1], dict) and "doc_id" in user_docs[-1]) else None
+    active_doc_name = user_docs[-1]["filename"] if (user_docs and isinstance(user_docs[-1], dict) and "filename" in user_docs[-1]) else None
+
     defaults = {
         "user_id": user_id,
         "user_name": user_name,
@@ -591,6 +595,8 @@ def initialize_session_state():
         "completed_quiz_ids": set(),
         "messages": user_msgs,
         "documents": user_docs,
+        "active_document_id": active_doc_id,
+        "active_document_name": active_doc_name,
         "learned_topics": user_topics,
         "current_subject": config.DEFAULT_SUBJECT,
         "quiz_mode": False,
@@ -784,6 +790,9 @@ with st.sidebar:
                                 user_id=st.session_state.user_id
                             )
                             st.session_state.documents.append(doc_data)
+                            st.session_state.active_document_id = doc_data.get("doc_id")
+                            st.session_state.active_document_name = doc_data.get("filename")
+                            st.session_state.pop("matching_chunks", None)
                             st.success(f"✅ Indexed: {file.name} ({doc_data['total_units']} {doc_data['file_type']} units)")
                             # Reward for uploading study material (+5 coins)
                             CoinManager.claim_reward(
@@ -2296,6 +2305,9 @@ PDF • PPT • PPTX (Max 100 MB per file)
                                     user_id=st.session_state.user_id
                                 )
                                 st.session_state.documents.append(doc_data)
+                                st.session_state.active_document_id = doc_data.get("doc_id")
+                                st.session_state.active_document_name = doc_data.get("filename")
+                                st.session_state.pop("matching_chunks", None)
                                 st.success(f"✅ Indexed: {file.name} ({doc_data['total_units']} chunks)")
                                 CoinManager.claim_reward(
                                     reward_id=f"upload_doc_{file.name}",
@@ -2311,11 +2323,38 @@ PDF • PPT • PPTX (Max 100 MB per file)
 
             if st.session_state.documents:
                 st.markdown("<div style='font-weight: 700; color: #E2E8F0; margin-top: 0.8rem; margin-bottom: 0.4rem; font-size: 0.88rem;'>📄 Indexed Knowledge Files:</div>", unsafe_allow_html=True)
+                
+                doc_map = {d["doc_id"]: d for d in st.session_state.documents if isinstance(d, dict) and "doc_id" in d}
+                curr_active_id = st.session_state.get("active_document_id")
+                if not curr_active_id or curr_active_id not in doc_map:
+                    curr_active_id = st.session_state.documents[-1]["doc_id"]
+                    st.session_state.active_document_id = curr_active_id
+                    st.session_state.active_document_name = doc_map[curr_active_id]["filename"]
+
+                if len(doc_map) > 1:
+                    doc_options = list(doc_map.keys())
+                    selected_doc_id = st.selectbox(
+                        "🎯 Select Active Document for AI Context:",
+                        options=doc_options,
+                        format_func=lambda did: f"📄 {doc_map[did]['filename']} ({doc_map[did].get('file_size_mb', 0)} MB)",
+                        index=doc_options.index(curr_active_id) if curr_active_id in doc_options else 0,
+                        key="active_doc_selector"
+                    )
+                    if selected_doc_id != st.session_state.get("active_document_id"):
+                        st.session_state.active_document_id = selected_doc_id
+                        st.session_state.active_document_name = doc_map[selected_doc_id]["filename"]
+                        st.session_state.pop("matching_chunks", None)
+                        st.rerun()
+
                 for doc in st.session_state.documents:
-                    doc_card_html = f"""<div class="vault-doc-card">
-<div class="doc-card-title">📄 {doc['filename']}</div>
+                    is_active = (doc.get("doc_id") == st.session_state.get("active_document_id"))
+                    active_badge = '<span style="color:#10B981; font-weight:bold;"> [ACTIVE]</span>' if is_active else ''
+                    card_border = "border:1px solid #10B981;" if is_active else ""
+                    status_lbl = "Active Context" if is_active else "Indexed"
+                    doc_card_html = f"""<div class="vault-doc-card" style="{card_border}">
+<div class="doc-card-title">📄 {doc['filename']}{active_badge}</div>
 <div class="doc-card-meta">{doc.get('file_size_mb', 0)} MB • {doc.get('total_units', 0)} knowledge chunks</div>
-<div class="doc-card-status">● Indexed</div>
+<div class="doc-card-status">● {status_lbl}</div>
 </div>"""
                     st.markdown(doc_card_html, unsafe_allow_html=True)
             else:
@@ -2370,7 +2409,8 @@ Supported: JPG • PNG • WEBP (Max 15 MB)
         with col_tutor:
             # AI Context Pill Indicator
             doc_cnt = len(st.session_state.documents)
-            context_status_text = f"● Connected ({doc_cnt} docs)" if doc_cnt > 0 else "○ No private material connected"
+            active_name = st.session_state.get("active_document_name") or (st.session_state.documents[-1]["filename"] if doc_cnt > 0 else "")
+            context_status_text = f"● Active: {active_name} ({doc_cnt} docs indexed)" if doc_cnt > 0 else "○ No private material connected"
             ai_context_html = f"""<div class="ai-context-pill">
 <span style="font-weight:700; color:#F8FAFC;">🧠 AI CONTEXT:</span>
 <span class="context-badge">{context_status_text}</span>
@@ -2378,9 +2418,10 @@ Supported: JPG • PNG • WEBP (Max 15 MB)
             st.markdown(ai_context_html, unsafe_allow_html=True)
 
             if st.session_state.documents:
-                latest_doc = st.session_state.documents[-1]
-                with st.expander(f"📖 Automatic Material Overview & Grounded Quiz: {latest_doc['filename']}", expanded=True):
-                    render_material_overview_card(latest_doc)
+                doc_map = {d["doc_id"]: d for d in st.session_state.documents if isinstance(d, dict) and "doc_id" in d}
+                active_doc = doc_map.get(st.session_state.get("active_document_id"), st.session_state.documents[-1])
+                with st.expander(f"📖 Automatic Material Overview & Grounded Quiz: {active_doc['filename']}", expanded=True):
+                    render_material_overview_card(active_doc)
 
             if len(st.session_state.messages) <= 1:
                 hero_3d_html = f"""<div class="hero-ai-container" id="heroNeuralContainer">
@@ -2551,6 +2592,8 @@ Supported: JPG • PNG • WEBP (Max 15 MB)
                                 else:
                                     try:
                                         img_bytes = img_payload["bytes"] if img_payload else None
+                                        matching_chunks = []
+                                        full_response = ""
 
                                         if img_bytes:
                                             vision_thinking_html = """<div class="ai-status-thinking"><span class="ai-status-pulse">◉</span> ANALYZING... Analyzing image with Gemini Vision...</div>"""
@@ -2576,16 +2619,20 @@ Supported: JPG • PNG • WEBP (Max 15 MB)
                                                 query=cleaned_prompt,
                                                 subject=st.session_state.current_subject,
                                                 top_k=config.TOP_K,
-                                                user_id=st.session_state.user_id
+                                                user_id=st.session_state.user_id,
+                                                doc_id=st.session_state.get("active_document_id"),
+                                                doc_name=st.session_state.get("active_document_name")
                                             )
 
-                                            # Check if student is asking about uploaded materials
+                                            # Check if student is explicitly asking about uploaded materials or has selected an active document
                                             doc_keywords = ["notes", "pdf", "ppt", "document", "uploaded", "material", "slides", "page"]
-                                            is_doc_query = any(k in prompt_lower for k in doc_keywords) or bool(st.session_state.documents)
+                                            is_explicit_doc_query = any(k in prompt_lower for k in doc_keywords) or bool(st.session_state.get("active_document_id"))
 
-                                            if is_doc_query and not matching_chunks:
-                                                # Grounded Answer Policy
-                                                full_response = "I couldn't find this information in the uploaded course material."
+                                            if is_explicit_doc_query and not matching_chunks:
+                                                if not st.session_state.get("documents"):
+                                                    full_response = "📁 **No course material has been uploaded yet.** Please upload a PDF, PPT, or PPTX file using the upload section above, and I will be happy to answer your questions!"
+                                                else:
+                                                    full_response = "I couldn't find this information in the uploaded course material."
                                                 st.markdown(full_response)
                                             else:
                                                 doc_context = document_processor.format_context_for_prompt(matching_chunks) if matching_chunks else ""
